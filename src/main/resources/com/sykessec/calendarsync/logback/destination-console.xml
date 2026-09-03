@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  destination=console: exactly what Boot configures on its own when no
+  logback-spring.xml is present, reused rather than restated so the pattern,
+  charset and threshold keep tracking whatever the Boot version does.
+-->
+<included>
+    <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</included>

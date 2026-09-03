@@ -1,0 +1,40 @@
+# Production profile: whole-database encryption via the Willena
+# SQLite3MultipleCiphers driver, keyed from the CALCLEANER_DB_KEY env var.
+# Must be paired with a jar built using the Maven "prod" profile (-Pprod),
+# which is what actually packages the Willena driver instead of Xerial's.
+#
+# calendarsync.base-url has no default here - failing fast if it's unset
+# matters because this URL is embedded in every generated /feed/{token}.ics
+# link; a leaked "localhost" URL there is a broken deployment, not a
+# cosmetic bug.
+calendarsync:
+  db:
+    encrypted: true
+    path: ${CALENDARSYNC_DB_PATH:/data/calendarsync.db}
+  base-url: ${CALENDARSYNC_BASE_URL}
+
+server:
+  servlet:
+    session:
+      cookie:
+        # Prod is expected to sit behind a TLS-terminating reverse proxy, so the
+        # session cookie must never be sent over plain http. Not set in the dev
+        # profile, where http://localhost is the norm and a Secure cookie would
+        # simply never be stored.
+        #
+        # Overridable because the app now speaks plain http on a published 8080:
+        # a browser pointed DIRECTLY at that port over http silently discards a
+        # Secure cookie, which presents as "login seems to succeed but every page
+        # bounces back to /login". Set this false only when deliberately running
+        # without a TLS proxy in front, never in a real deployment.
+        secure: ${CALENDARSYNC_SECURE_COOKIE:true}
+
+logging:
+  level:
+    com.sykessec.calendarsync: INFO
+  # Under /data because that is the only writable, persistent path in the
+  # container - the image runs as a non-root user with a read-only app dir,
+  # so a log file anywhere else would either fail to open or vanish on
+  # redeploy. Ignored unless calendarsync.logging.destination=file.
+  file:
+    name: ${CALENDARSYNC_LOG_PATH:/data/logs/calendarsync.log}

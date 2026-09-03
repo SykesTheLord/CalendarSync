@@ -1,0 +1,143 @@
+/* CalendarSync theme: a light layer of modern polish on top of Lumo, plus
+ * the design tokens the dark/light toggle (wired up in AppShellConfig) needs.
+ * Dark mode is driven by the `theme="dark"` attribute Lumo already reads on
+ * <html> - this file only supplies the accent color and a few utility
+ * classes, it doesn't reimplement Lumo's light/dark palettes.
+ */
+
+html {
+  --lumo-font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --lumo-border-radius-s: 0.375rem;
+  --lumo-border-radius-m: 0.5rem;
+  --lumo-border-radius-l: 0.875rem;
+
+  --lumo-primary-color: hsl(249, 82%, 63%);
+  --lumo-primary-color-50pct: hsla(249, 82%, 63%, 0.5);
+  --lumo-primary-color-10pct: hsla(249, 82%, 63%, 0.1);
+  --lumo-primary-text-color: hsl(249, 74%, 56%);
+}
+
+html[theme~="dark"] {
+  --lumo-primary-color: hsl(249, 100%, 77%);
+  --lumo-primary-color-50pct: hsla(249, 100%, 77%, 0.5);
+  --lumo-primary-color-10pct: hsla(249, 100%, 77%, 0.12);
+  --lumo-primary-text-color: hsl(249, 100%, 82%);
+}
+
+html,
+body {
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Smooth, non-jarring color swap when the theme changes - scoped to color
+ * properties only so layout-affecting properties never transition. */
+html,
+body,
+.cs-card,
+vaadin-app-layout::part(navbar),
+vaadin-app-layout::part(drawer) {
+  transition: background-color 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+
+/* Reusable elevated surface, used for the login card and can be reused
+ * anywhere a view wants to group content visually. */
+.cs-card {
+  background: var(--lumo-base-color);
+  border: 1px solid var(--lumo-contrast-10pct);
+  border-radius: var(--lumo-border-radius-l);
+  box-shadow: 0 1px 2px hsla(0, 0%, 0%, 0.04), 0 8px 24px hsla(0, 0%, 0%, 0.06);
+  padding: var(--lumo-space-l);
+}
+
+html[theme~="dark"] .cs-card {
+  box-shadow: 0 1px 2px hsla(0, 0%, 0%, 0.2), 0 8px 24px hsla(0, 0%, 0%, 0.35);
+}
+
+.cs-login-page {
+  height: 100%;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--lumo-contrast-5pct);
+}
+
+.cs-login-card {
+  width: 22rem;
+  max-width: 90vw;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--lumo-space-m);
+}
+
+.cs-login-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--lumo-space-s);
+  margin-bottom: var(--lumo-space-xs);
+}
+
+.cs-login-brand vaadin-icon {
+  color: var(--lumo-primary-color);
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+.cs-login-brand h1 {
+  font-size: 1.375rem;
+  margin: 0;
+}
+
+/* Page header used at the top of every view: icon + title (+ optional
+ * description) so every view reads consistently instead of a bare grid. */
+.cs-view-header {
+  display: flex;
+  align-items: center;
+  gap: var(--lumo-space-m);
+  margin-block-end: var(--lumo-space-m);
+}
+
+.cs-view-header vaadin-icon {
+  color: var(--lumo-primary-color);
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: none;
+}
+
+.cs-view-header h2 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.cs-view-header p {
+  margin: 0;
+  color: var(--lumo-secondary-text-color);
+  font-size: var(--lumo-font-size-s);
+}
+
+/* App shell chrome */
+.cs-navbar-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--lumo-space-s);
+}
+
+.cs-navbar-brand vaadin-icon {
+  color: var(--lumo-primary-color);
+}
+
+.cs-navbar-brand h1 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+/* Views fill the app layout's content area so their grid can grow into it
+ * rather than sitting at Grid's fixed 400px default with blank page below. */
+vaadin-app-layout::part(content) {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}

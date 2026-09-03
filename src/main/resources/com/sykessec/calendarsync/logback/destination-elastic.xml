@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  destination=elastic: ECS JSON, one document per line, over a TCP connection to
+  Logstash (a `tcp { codec => json_lines }` input) or to an Elastic Agent /
+  Logstash-compatible collector, which is what actually indexes into
+  Elasticsearch. The app never talks to Elasticsearch itself.
+
+  Two libraries meet here and it is worth being explicit about which does what:
+    - the FORMAT is Boot's own StructuredLogEncoder, i.e. the same ECS output
+      logging.structured.format.file=ecs would produce, so the ECS service.*
+      fields are configured through logging.structured.ecs.service.* and
+      service.name defaults to spring.application.name;
+    - the TRANSPORT is logstash-logback-encoder's appender, subclassed only to
+      get a tls boolean (see ElasticTcpAppender). None of that library's own
+      JSON encoders are used.
+
+  Delivery is best-effort by design. Events go onto a ring buffer and are
+  written by a background thread, and the appender's default append timeout of
+  zero means a full buffer drops events rather than blocking the request thread
+  that logged them.
+
+  This destination sends no application logs to stdout, but it does not go
+  completely silent when the collector is unreachable: the appender reports
+  connect/reconnect failures through logback's status manager, and Boot's
+  SystemStatusListener prints WARN and above to stderr. So a misconfigured
+  collector still shows up in `docker logs`, just as status lines rather than
+  as the application's own logging.
+-->
+<included>
+    <appender name="ELASTIC" class="com.sykessec.calendarsync.config.ElasticTcpAppender">
+        <destination>${LOG_ELASTIC_HOST}:${LOG_ELASTIC_PORT}</destination>
+        <tls>${LOG_ELASTIC_TLS}</tls>
+
+        <encoder class="org.springframework.boot.logging.logback.StructuredLogEncoder">
+            <format>ecs</format>
+            <charset>UTF-8</charset>
+        </encoder>
+
+        <!-- A collector restart or a firewall idle-timeout otherwise leaves a
+             half-open socket that looks writable until the OS gives up on it,
+             which is long enough to lose a meaningful amount of logs. -->
+        <keepAliveDuration>1 minute</keepAliveDuration>
+        <writeTimeout>1 minute</writeTimeout>
+
+        <!-- Default is a full minute of trying to drain the buffer on shutdown,
+             which an unreachable collector will always spend in full - longer
+             than the 10s Docker gives a container before SIGKILL, so the app
+             would look like it hangs on every stop whenever Logstash is down. -->
+        <shutdownGracePeriod>5 seconds</shutdownGracePeriod>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="ELASTIC"/>
+    </root>
+</included>

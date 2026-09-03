@@ -1,0 +1,68 @@
+# Optional systemd unit for running the CalendarSync compose stack.
+#
+# The compose file's own `restart: unless-stopped` is enough for autostart on
+# most hosts, and needs no unit at all - PROVIDED the Docker daemon itself
+# starts at boot. On a socket-activated install (Arch and anything else that
+# enables docker.socket but not docker.service) it does not: dockerd only
+# starts when something first connects to /run/docker.sock, so restart-policy
+# containers stay down indefinitely after a reboot, with nothing in the logs
+# to say so. `systemctl enable docker.service` fixes that and is the smaller
+# change; see the README.
+#
+# This unit is the alternative for operators who want the stack owned by
+# systemd instead. It buys three things the restart policy cannot:
+#
+#   1. Requires=docker.service pulls the daemon up at boot even where only
+#      docker.socket is enabled, so the socket-activation trap above cannot
+#      bite regardless of how Docker was installed.
+#   2. It re-runs `compose up -d`, so a stack that was taken down with
+#      `docker compose down` (which removes the containers, restart policy
+#      and all) still comes back, and .env / compose edits are picked up.
+#   3. `systemctl status calendarsync` and the journal become the place to
+#      look when it did not come back, rather than `docker ps -a`.
+#
+# Mutually exclusive with deploy/calendarsync-native.service, which installs to
+# the same unit name for a no-Docker install. One host runs one of the two.
+#
+# Install (as root):
+#   install -Dm644 deploy/calendarsync-compose.service /etc/systemd/system/calendarsync.service
+#   # then set WorkingDirectory below to wherever the repo/compose file lives
+#   systemctl daemon-reload
+#   systemctl enable --now calendarsync.service
+#
+# Note that ExecStop marks the containers as user-stopped, which is exactly
+# what `unless-stopped` declines to restart - so once this unit is in charge,
+# it, and not the restart policy, is what brings the stack back. That is the
+# intended division, not a conflict: both mechanisms may be left in place.
+
+[Unit]
+Description=CalendarSync (docker compose stack)
+# Requires, not Wants: without the daemon there is nothing to start, and the
+# ordering must be explicit or `compose up` races a socket that has no dockerd
+# behind it yet.
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+# oneshot + RemainAfterExit: `compose up -d` returns immediately, and the unit
+# should read as active for as long as the stack it started is up.
+Type=oneshot
+RemainAfterExit=yes
+
+# The directory holding docker-compose.yml AND .env - compose reads .env
+# relative to its working directory, and a missing one is not an error, it is
+# an empty CALCLEANER_DB_KEY and a container that fails at startup.
+WorkingDirectory=/opt/calendarsync
+
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+# `stop`, not `down`: down removes the containers, so a shutdown would discard
+# them on every reboot rather than restarting what is already there.
+ExecStop=/usr/bin/docker compose stop
+
+# An image build (docker compose up --build on a cold cache) has no useful
+# upper bound, and a timeout mid-build leaves a half-built stack.
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

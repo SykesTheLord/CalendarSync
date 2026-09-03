@@ -1,0 +1,98 @@
+# systemd unit for a native (no Docker) install of CalendarSync.
+#
+# Installed as /etc/systemd/system/calendarsync.service by
+# deploy/install-ubuntu.sh, which also creates the user, directories and
+# environment file this refers to. It is mutually exclusive with
+# deploy/calendarsync-compose.service - one host runs one of them, never both
+# under different names, or two copies of the app fight over port 8080 and,
+# worse, over the same SQLite file if the paths ever coincide.
+#
+# Layout it assumes:
+#   /opt/calendarsync/calendarsync.jar     the application (root-owned, read-only to the service)
+#   /var/lib/calendarsync/                 SQLite database, logs - the only writable path
+#   /etc/calendarsync/calendarsync.env     configuration, including CALCLEANER_DB_KEY (0600 root:root)
+
+[Unit]
+Description=CalendarSync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# exec, not simple: systemd then reports a start failure if the binary cannot
+# be executed at all (wrong java path, missing jar), instead of reporting
+# success and leaving the failure to be discovered in the journal.
+Type=exec
+User=calendarsync
+Group=calendarsync
+
+# The Spring profile is set HERE rather than in the environment file because
+# it is not a deployment preference - it must match the Maven profile the jar
+# was built with. A -Pprod jar carries the Willena (encrypting) SQLite driver,
+# and running it under any other Spring profile opens the encrypted database
+# unencrypted-shaped, i.e. not at all. An operator editing the env file should
+# not have to know that.
+Environment=SPRING_PROFILES_ACTIVE=prod
+
+# Read as root by systemd BEFORE dropping to User=, which is why this file can
+# be 0600 root:root: the service account itself never needs read access to the
+# database key. Docker's .env cannot do that - it is read by the client, as the
+# invoking user.
+EnvironmentFile=/etc/calendarsync/calendarsync.env
+
+WorkingDirectory=/var/lib/calendarsync
+# /usr/bin/java is the update-alternatives symlink. On a host with more than
+# one JDK installed it may not point at 25, and the failure is an
+# UnsupportedClassVersionError at startup; pin the absolute path
+# (/usr/lib/jvm/java-25-openjdk-amd64/bin/java) if that is a risk here.
+ExecStart=/usr/bin/java -jar /opt/calendarsync/calendarsync.jar
+
+# The JVM exits 143 (128+SIGTERM) on a clean `systemctl stop`. Without this
+# every ordinary stop is recorded as a failed unit.
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=5
+# Spring's shutdown, plus the 5s grace the logging appender waits when its
+# collector is unreachable (see NOTES.md), fits comfortably inside this.
+TimeoutStopSec=30
+
+# Umask, not a chmod: the SQLite file is created by the app at runtime, so its
+# permissions come from the process. 0077 keeps the database off-limits to
+# every other account on the box - it holds calendar contents in the clear
+# once the driver has decrypted it into memory, and OAuth refresh tokens on
+# disk under a key that is only one file away.
+UMask=0077
+
+# --- Sandboxing ---------------------------------------------------------
+# Deliberately NOT MemoryDenyWriteExecute=true, which is otherwise standard in
+# a hardened unit: the JIT maps executable pages it also writes to, so it stops
+# the JVM from starting at all. Its absence here is a decision, not an omission.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/calendarsync
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+# AF_NETLINK alongside the obvious ones: Java's NetworkInterface enumeration
+# uses a netlink socket on Linux, and Tomcat touches it during startup.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+# The broad @system-service set rather than a hand-minimised list - a filter
+# tight enough to be interesting would need re-tuning on every JVM upgrade,
+# and one that silently kills the process on an unusual code path is worse
+# than the sandbox is worth.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

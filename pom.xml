@@ -1,0 +1,334 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.0.4</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.sykessec</groupId>
+    <artifactId>calendarsync</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+    <name>CalendarSync</name>
+    <description>Self-hosted multi-user calendar rule-engine application</description>
+
+    <properties>
+        <java.version>25</java.version>
+        <maven.compiler.release>25</maven.compiler.release>
+
+        <!-- Stage 0 pins -->
+        <vaadin.version>25.1.4</vaadin.version>
+        <flyway.version>13.1.0</flyway.version>
+        <xerial.sqlite.version>3.53.2.1</xerial.sqlite.version>
+        <willena.sqlite.version>3.53.2.0</willena.sqlite.version>
+
+        <!-- Stage 1/2 pins, recorded now so later stages don't re-derive them.
+             Re-verify against Maven Central immediately before first use in Stage 1/2 -
+             these were checked live in Aug 2026 but provider SDKs cut releases often. -->
+        <google.api.client.version>2.9.0</google.api.client.version>
+        <google.calendar.api.version>v3-rev20260517-2.0.0</google.calendar.api.version>
+        <microsoft.graph.version>6.66.1</microsoft.graph.version>
+        <azure.identity.version>1.16.2</azure.identity.version>
+        <ical4j.version>4.3.0</ical4j.version>
+        <quartz.version>2.5.2</quartz.version>
+
+        <!-- Stage 4: TCP transport for the "elastic" logging destination.
+             9.x is the first line built against Jackson 3 (tools.jackson.*),
+             which is what Boot 4 puts on the classpath - 8.x would drag a
+             second, Jackson 2 databind in alongside it. -->
+        <logstash.logback.version>9.0</logstash.logback.version>
+
+        <!-- Code quality. Checkstyle core is pinned separately from its Maven
+             plugin because the plugin ships an older core by default, and only
+             recent cores parse the Java 21+ syntax (records, pattern switch)
+             this source uses. -->
+        <spotless.version>2.44.5</spotless.version>
+        <maven.checkstyle.plugin.version>3.6.0</maven.checkstyle.plugin.version>
+        <checkstyle.version>10.26.1</checkstyle.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>com.vaadin</groupId>
+                <artifactId>vaadin-bom</artifactId>
+                <version>${vaadin.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!-- Hibernate ships no official SQLite dialect; the community dialects
+             module provides org.hibernate.community.dialect.SQLiteDialect. -->
+        <dependency>
+            <groupId>org.hibernate.orm</groupId>
+            <artifactId>hibernate-community-dialects</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.vaadin</groupId>
+            <artifactId>vaadin-spring-boot-starter</artifactId>
+        </dependency>
+
+        <!-- Spring Boot 4 split FlywayAutoConfiguration out of the monolithic
+             autoconfigure jar into this dedicated starter - flyway-core alone
+             is no longer enough to get migrations running automatically. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+            <version>${flyway.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-nc-sqlite</artifactId>
+            <version>${flyway.version}</version>
+            <exclusions>
+                <!-- We supply our own pinned SQLite JDBC driver (Xerial dev/test,
+                     Willena encrypted prod) - don't let Flyway's transitive
+                     driver shadow either of them. -->
+                <exclusion>
+                    <groupId>org.xerial</groupId>
+                    <artifactId>sqlite-jdbc</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!-- Stage 1: ical4j for ICS parsing/generation (CalDAV event bodies now;
+             the ICS_SOURCE provider and IcsExportService reuse it in Stage 2). -->
+        <dependency>
+            <groupId>org.mnode.ical4j</groupId>
+            <artifactId>ical4j</artifactId>
+            <version>${ical4j.version}</version>
+        </dependency>
+
+        <!-- Stage 1: Google Calendar provider. google-api-client pulls the
+             OAuth2 authorization-code-flow helpers used for the initial
+             connect + refresh-token exchange. -->
+        <dependency>
+            <groupId>com.google.apis</groupId>
+            <artifactId>google-api-services-calendar</artifactId>
+            <version>${google.calendar.api.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.google.api-client</groupId>
+            <artifactId>google-api-client</artifactId>
+            <version>${google.api.client.version}</version>
+        </dependency>
+
+        <!-- Stage 1: Microsoft Graph provider (Outlook/Microsoft 365). -->
+        <dependency>
+            <groupId>com.microsoft.graph</groupId>
+            <artifactId>microsoft-graph</artifactId>
+            <version>${microsoft.graph.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.azure</groupId>
+            <artifactId>azure-identity</artifactId>
+            <version>${azure.identity.version}</version>
+        </dependency>
+
+        <!-- Stage 4: LogstashTcpSocketAppender, used ONLY as a transport by the
+             "elastic" logging destination (see logback-spring.xml). The ECS JSON
+             it ships is produced by Boot's own StructuredLogEncoder, not by this
+             library's encoders - so nothing here formats log events, it just
+             owns the async queue, reconnect loop and optional TLS. -->
+        <dependency>
+            <groupId>net.logstash.logback</groupId>
+            <artifactId>logstash-logback-encoder</artifactId>
+            <version>${logstash.logback.version}</version>
+        </dependency>
+
+        <!-- Stage 1: Quartz per-connection sync jobs. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-quartz</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <!-- Xerial (dev) and Willena (prod) both register a JDBC driver class named
+         org.sqlite.JDBC, so they must never both be on the classpath at once.
+         Each is declared ONLY inside its profile (never as an unconditional
+         dependency above) to guarantee that. "dev" is default-active, so a
+         plain `mvn package`/`mvn test` always has a working SQLite driver;
+         building/testing under `-Pprod` requires the CALCLEANER_DB_KEY env var
+         (see application-prod.yml) since the encrypted driver needs a key. -->
+    <profiles>
+        <profile>
+            <id>dev</id>
+            <activation>
+                <activeByDefault>true</activeByDefault>
+            </activation>
+            <dependencies>
+                <dependency>
+                    <groupId>org.xerial</groupId>
+                    <artifactId>sqlite-jdbc</artifactId>
+                    <version>${xerial.sqlite.version}</version>
+                </dependency>
+                <!-- Vaadin's dev-mode live reload server (Vite). Needed
+                     whenever Vaadin is NOT running in production mode -
+                     without it, boot fails with "'vaadin-dev-server' not
+                     found" the moment any view is requested (including in
+                     tests that boot the full context). Deliberately left
+                     out of the prod profile, where production mode serves a
+                     pre-built frontend bundle instead. -->
+                <dependency>
+                    <groupId>com.vaadin</groupId>
+                    <artifactId>vaadin-dev</artifactId>
+                </dependency>
+            </dependencies>
+        </profile>
+
+        <!-- Also carries Vaadin's production-mode frontend build (vaadin.productionMode=true
+             plus the build-frontend goal), not just the SQLite driver choice -
+             deliberately the SAME profile as the driver switch rather than a
+             second "production" profile matching Vaadin's own naming
+             convention, so the two concerns can't be activated out of sync
+             with each other (dev-mode Vaadin + Willena driver, or vice versa,
+             would both be broken combinations). Requires Node.js on PATH at
+             build time for the frontend bundle - see the Dockerfile's build
+             stage, which installs it. -->
+        <profile>
+            <id>prod</id>
+            <properties>
+                <vaadin.productionMode>true</vaadin.productionMode>
+            </properties>
+            <dependencies>
+                <dependency>
+                    <groupId>io.github.willena</groupId>
+                    <artifactId>sqlite-jdbc</artifactId>
+                    <version>${willena.sqlite.version}</version>
+                </dependency>
+            </dependencies>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>com.vaadin</groupId>
+                        <artifactId>vaadin-maven-plugin</artifactId>
+                        <version>${vaadin.version}</version>
+                        <executions>
+                            <execution>
+                                <goals>
+                                    <goal>prepare-frontend</goal>
+                                    <goal>build-frontend</goal>
+                                </goals>
+                                <phase>compile</phase>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+
+            <!-- Formatting. Deliberately NOT a full reformatter (no
+                 google-java-format / palantir): this source is hand-wrapped at
+                 ~110-120 columns with long explanatory comment blocks, and a
+                 whole-file formatter would rewrite all 115 files and mangle
+                 that prose. These operations are the ones that are objectively
+                 right and currently already true everywhere, so `spotless:check`
+                 passes clean on an untouched tree and only catches new drift. -->
+            <plugin>
+                <groupId>com.diffplug.spotless</groupId>
+                <artifactId>spotless-maven-plugin</artifactId>
+                <version>${spotless.version}</version>
+                <configuration>
+                    <java>
+                        <removeUnusedImports/>
+                        <!-- Matches the existing convention: everything else
+                             alphabetically, then javax and java together in one
+                             block (javax first - the IntelliJ default layout this
+                             source was written with), then statics last. The pipe
+                             groups javax with java so no blank line is inserted
+                             between them. -->
+                        <importOrder>
+                            <order>,javax|java,\#</order>
+                        </importOrder>
+                        <trimTrailingWhitespace/>
+                        <endWithNewline/>
+                    </java>
+                </configuration>
+            </plugin>
+
+            <!-- Linting. Bound to `validate` so breakage surfaces before a long
+                 compile, but severity is "warning" in the ruleset and
+                 failOnViolation is false - this is a signal channel, not a gate.
+                 Turn failOnViolation on once the warning count is a number you
+                 are happy to defend. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-checkstyle-plugin</artifactId>
+                <version>${maven.checkstyle.plugin.version}</version>
+                <dependencies>
+                    <dependency>
+                        <groupId>com.puppycrawl.tools</groupId>
+                        <artifactId>checkstyle</artifactId>
+                        <version>${checkstyle.version}</version>
+                    </dependency>
+                </dependencies>
+                <configuration>
+                    <configLocation>config/checkstyle/checkstyle.xml</configLocation>
+                    <includeTestSourceDirectory>true</includeTestSourceDirectory>
+                    <consoleOutput>true</consoleOutput>
+                    <failOnViolation>false</failOnViolation>
+                    <violationSeverity>warning</violationSeverity>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>checkstyle-validate</id>
+                        <phase>validate</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

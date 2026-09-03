@@ -1,0 +1,74 @@
+# Self-hosted deployment: CalendarSync speaking plain HTTP on 8080, with TLS
+# terminated by a reverse proxy running elsewhere (another host, a load
+# balancer, an ingress controller). This compose file no longer ships a proxy
+# of its own - see nginx/nginx.conf for a worked example config to apply on
+# whichever machine actually terminates TLS.
+#
+# Proton (and any other "subscribe by URL" client) needs a stable HTTPS URL to
+# poll /feed/{token}.ics, so a TLS terminator in front is still required for
+# that feature - it just isn't this file's job any more.
+#
+# Before running: copy .env.example to .env and fill it in.
+#
+# SECURITY: publishing 8080 puts the app's HTTP port on the host, so anything
+# that can route to it can reach /login directly. Two consequences worth
+# handling deliberately:
+#
+#   1. Bind the published port to the interface the proxy reaches it on rather
+#      than every interface. The mapping below is written as 127.0.0.1:8080 for
+#      the safe default (proxy on this same host, or reached over an SSH/WireGuard
+#      tunnel). For a proxy on another machine, change it to that host's private
+#      address - e.g. "10.0.0.5:8080:8080" - not a bare "8080:8080", which
+#      listens on every interface including any public one.
+#   2. Set CALENDARSYNC_TRUSTED_PROXIES to the proxy's address. X-Forwarded-For
+#      is only honoured from source addresses in that list, and the login
+#      brute-force throttle keys on the client IP it produces.
+services:
+  calendarsync:
+    build: .
+    # Autostart on reboot, half of it. `unless-stopped` means the daemon
+    # restarts this container whenever the daemon itself starts - including
+    # after a reboot - unless the operator deliberately stopped it first. The
+    # other half is outside compose's reach: the DOCKER DAEMON has to start at
+    # boot too. Where Docker is socket-activated (docker.socket enabled,
+    # docker.service not - the Arch default), dockerd starts only when
+    # something first connects to /run/docker.sock, so nothing restarts this
+    # container and nothing reports that it didn't. `systemctl enable
+    # docker.service` is the fix; deploy/calendarsync-compose.service is the
+    # alternative for hosts that would rather own the stack from systemd.
+    #
+    # `unless-stopped` rather than `always` on purpose: an operator who ran
+    # `docker compose stop` before a reboot meant it, and `always` would
+    # override that on the way back up.
+    restart: unless-stopped
+    environment:
+      CALCLEANER_DB_KEY: ${CALCLEANER_DB_KEY}
+      CALENDARSYNC_BASE_URL: ${CALENDARSYNC_BASE_URL}
+      # Source addresses allowed to set X-Forwarded-For/Proto. Defaults to the
+      # private + loopback ranges; narrow it to the proxy's actual address.
+      CALENDARSYNC_TRUSTED_PROXIES: ${CALENDARSYNC_TRUSTED_PROXIES:-192.168.0.0/16,172.16.0.0/12,169.254.0.0/16,fc00::/7,10.0.0.0/8,100.64.0.0/10,127.0.0.0/8,fe80::/10,::1/128}
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      MS_OAUTH_CLIENT_ID: ${MS_OAUTH_CLIENT_ID:-}
+      MS_OAUTH_CLIENT_SECRET: ${MS_OAUTH_CLIENT_SECRET:-}
+      MS_OAUTH_TENANT_ID: ${MS_OAUTH_TENANT_ID:-common}
+      # console (docker logs), file (onto the /data volume below), or elastic.
+      # The elastic settings are only read when the destination is "elastic",
+      # and point at a Logstash/Elastic Agent TCP input, not at Elasticsearch.
+      CALENDARSYNC_LOG_DESTINATION: ${CALENDARSYNC_LOG_DESTINATION:-console}
+      CALENDARSYNC_LOG_ELASTIC_HOST: ${CALENDARSYNC_LOG_ELASTIC_HOST:-localhost}
+      CALENDARSYNC_LOG_ELASTIC_PORT: ${CALENDARSYNC_LOG_ELASTIC_PORT:-5044}
+      CALENDARSYNC_LOG_ELASTIC_TLS: ${CALENDARSYNC_LOG_ELASTIC_TLS:-false}
+    volumes:
+      - calendarsync-data:/data
+    ports:
+      # host-interface:host-port:container-port. The interface comes from
+      # CALENDARSYNC_BIND_ADDRESS in .env and defaults to loopback, which is
+      # deliberately the SAFE default rather than the convenient one: a proxy on
+      # another machine cannot reach 127.0.0.1, so this default fails closed and
+      # visibly instead of quietly listening on a public interface. Set it to the
+      # private address your proxy connects to, e.g. 10.0.0.7.
+      - "${CALENDARSYNC_BIND_ADDRESS:-127.0.0.1}:8080:8080"
+
+volumes:
+  calendarsync-data:

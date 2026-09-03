@@ -1,0 +1,102 @@
+<?xml version="1.0"?>
+<!DOCTYPE module PUBLIC
+        "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+        "https://checkstyle.org/dtds/configuration_1_3.dtd">
+
+<!--
+  Deliberately a small ruleset. This codebase had no linter for its first 19
+  commits and its existing style is consistent and intentional, so the goal
+  here is to ratify what is already true and catch drift - not to impose a
+  house style retroactively and produce hundreds of violations nobody reads.
+
+  Notably absent, and on purpose:
+    - Javadoc requirements. The project's comment convention is explanatory
+      prose about *why*, not per-parameter boilerplate; a JavadocMethod rule
+      would push it toward the opposite.
+    - MissingSwitchDefault. Modern exhaustive switch expressions over enums
+      are correct without a default, and adding one hides the compiler error
+      you actually want when a new enum constant appears.
+    - MagicNumber, and design rules like VisibilityModifier. Too noisy against
+      JPA entities and Vaadin view construction to be worth reading.
+-->
+<module name="Checker">
+    <property name="severity" value="warning"/>
+    <property name="fileExtensions" value="java"/>
+
+    <module name="NewlineAtEndOfFile"/>
+    <module name="FileTabCharacter"/>
+
+    <module name="RegexpSingleline">
+        <property name="format" value="\s+$"/>
+        <property name="message" value="Line has trailing whitespace."/>
+    </module>
+
+    <module name="LineLength">
+        <!-- The de-facto wrap in this source is ~110-120, but a couple of dozen
+             existing lines run to 132. 140 is set as a "runaway line" backstop
+             rather than a style target: at 120 this rule fires 24 times on an
+             untouched tree, which is how a linter teaches people to ignore it. -->
+        <property name="max" value="140"/>
+        <property name="ignorePattern" value="^\s*(import|package)\s|^\s*\*\s*https?://|\bhttps?://\S{40,}"/>
+    </module>
+
+    <module name="TreeWalker">
+
+        <!-- Imports. The convention here is explicit imports, alphabetical,
+             with java/javax after everything else and statics last. Spotless
+             enforces the ordering; these catch the correctness half. -->
+        <module name="UnusedImports">
+            <property name="processJavadoc" value="true"/>
+        </module>
+        <module name="RedundantImport"/>
+        <module name="AvoidStarImport"/>
+        <module name="IllegalImport"/>
+
+        <!-- Naming. Standard Java conventions, which this source already follows. -->
+        <module name="PackageName"/>
+        <module name="TypeName"/>
+        <module name="MethodName"/>
+        <module name="MemberName"/>
+        <module name="ParameterName"/>
+        <module name="LocalVariableName"/>
+        <module name="LocalFinalVariableName"/>
+        <!-- Allows the SLF4J `private static final Logger log` idiom, which is
+             used in every logging class here and is not a constant in spirit. -->
+        <module name="ConstantName">
+            <property name="format" value="^(log|[A-Z][A-Z0-9]*(_[A-Z0-9]+)*)$"/>
+        </module>
+
+        <!-- Structure and correctness smells. -->
+        <module name="OneTopLevelClass"/>
+        <module name="EqualsHashCode"/>
+        <module name="CovariantEquals"/>
+        <module name="StringLiteralEquality"/>
+        <module name="SimplifyBooleanExpression"/>
+        <module name="SimplifyBooleanReturn"/>
+        <module name="EmptyStatement"/>
+        <module name="FallThrough"/>
+        <module name="DefaultComesLast"/>
+        <module name="MultipleVariableDeclarations"/>
+        <module name="ModifierOrder"/>
+        <module name="RedundantModifier"/>
+        <module name="UpperEll"/>
+        <module name="ArrayTypeStyle"/>
+
+        <!-- Braces. Non-negotiable in this source and cheap to keep true. -->
+        <!-- allowSingleLineStatement permits the `if (this == o) return true;`
+             guard-clause form used in the entity equals() methods. A brace-less
+             if spanning two lines is still flagged, which is the dangerous one. -->
+        <module name="NeedBraces">
+            <property name="allowSingleLineStatement" value="true"/>
+        </module>
+        <module name="LeftCurly"/>
+        <module name="RightCurly"/>
+
+        <!-- An empty catch block is how a swallowed provider error becomes a
+             silent sync failure. Allow it only when the developer says why. -->
+        <module name="EmptyCatchBlock">
+            <property name="commentFormat" value=".*"/>
+        </module>
+
+    </module>
+</module>

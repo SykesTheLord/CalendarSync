@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  Logging destination is selected by calendarsync.logging.destination:
+
+    console  - Boot's usual human-readable stdout (the default, and what dev uses)
+    file     - rolling plain-text file at logging.file.name
+    elastic  - ECS JSON over TCP to Logstash / Elastic Agent
+
+  Exactly ONE of these is attached to the root logger; they are alternatives,
+  not layers. In particular "elastic" means stdout goes quiet, so `docker logs`
+  shows only the Spring banner and whatever the JVM writes outside logback.
+  Adding a second <appender-ref/> to the chosen destination file below is all
+  it takes if a deployment wants both.
+
+  The switch is implemented by substituting the property into the <include>
+  resource path rather than with logback's <if> element, which would pull in
+  Janino purely to compare two strings. The cost of that trick is that an
+  unrecognised value fails as "Could not find resource" from logback's status
+  manager and leaves the root logger with no appenders at all - so
+  AppProperties.Logging.destination carries a @Pattern matching the file names
+  exactly, which turns the same typo into a normal fail-fast startup error a
+  few milliseconds later.
+
+  Log LEVELS are unaffected by any of this and stay on logging.level.* in the
+  YAML, which Boot applies after this file has been parsed.
+-->
+<configuration>
+
+    <!-- CONSOLE_LOG_PATTERN / FILE_LOG_PATTERN and the noisy-third-party
+         logger levels Boot would otherwise have set for us programmatically. -->
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <springProperty scope="context" name="LOG_DESTINATION"
+                    source="calendarsync.logging.destination" defaultValue="console"/>
+    <springProperty scope="context" name="LOG_ELASTIC_HOST"
+                    source="calendarsync.logging.elastic.host" defaultValue="localhost"/>
+    <springProperty scope="context" name="LOG_ELASTIC_PORT"
+                    source="calendarsync.logging.elastic.port" defaultValue="5044"/>
+    <springProperty scope="context" name="LOG_ELASTIC_TLS"
+                    source="calendarsync.logging.elastic.tls" defaultValue="false"/>
+
+    <!-- Boot exports LOG_FILE from logging.file.name before this file is read;
+         the fallback only matters if destination=file is set without one. -->
+    <property name="LOG_FILE" value="${LOG_FILE:-./data/logs/calendarsync.log}"/>
+
+    <include resource="com/sykessec/calendarsync/logback/destination-${LOG_DESTINATION}.xml"/>
+
+</configuration>

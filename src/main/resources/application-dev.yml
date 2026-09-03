@@ -1,0 +1,12 @@
+# Local development profile: unencrypted Xerial SQLite driver, file under ./data/.
+calendarsync:
+  db:
+    encrypted: false
+    path: ./data/calendarsync-dev.db
+  base-url: http://localhost:8080
+
+logging:
+  level:
+    com.sykessec.calendarsync: DEBUG
+  file:
+    name: ./data/logs/calendarsync-dev.log

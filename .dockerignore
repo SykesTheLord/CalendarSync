@@ -1,0 +1,17 @@
+target/
+data/
+.git/
+.idea/
+*.iml
+.vscode/
+# Only the GENERATED parts of src/main/frontend/ are excluded. The hand-authored
+# theme under themes/calendarsync/ must reach the build context: the image build
+# installs Node specifically to compile it, and @Theme("calendarsync") makes
+# vaadin:build-frontend fail outright when the directory is absent. Excluding the
+# whole tree - as this file previously did - broke the production build.
+src/main/frontend/generated/
+src/main/frontend/index.html
+
+# Vaadin's dev-mode bundle. The prod build makes its own; shipping the dev one
+# into the build context would only invalidate cache layers.
+src/main/bundles/

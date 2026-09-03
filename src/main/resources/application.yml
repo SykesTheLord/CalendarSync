@@ -1,0 +1,100 @@
+spring:
+  application:
+    name: calendarsync
+  profiles:
+    default: dev
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        dialect: org.hibernate.community.dialect.SQLiteDialect
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+server:
+  port: 8080
+  # An external reverse proxy terminates TLS and forwards X-Forwarded-Proto/For.
+  # Without this Boot ignores those headers entirely, so the app believes every
+  # request arrived over plain http - which means redirects it builds are http
+  # and the session cookie never gets marked Secure.
+  #
+  # "native" rather than "framework", and the difference is security-relevant.
+  # Both read the headers; "framework" (Spring's ForwardedHeaderFilter) trusts
+  # them from ANY caller, while "native" uses Tomcat's RemoteIpValve, which
+  # honours them only from a source address listed in internal-proxies below.
+  # That became load-bearing when port 8080 started being published directly
+  # rather than sitting on a private network reachable only by a co-located
+  # nginx: LoginAttemptService rate-limits password guessing by client IP and
+  # reads that IP from getRemoteAddr(), so an X-Forwarded-For that anyone may
+  # set lets an attacker rotate it per request and never trip the lockout.
+  forward-headers-strategy: native
+  tomcat:
+    remoteip:
+      # Which SOURCE addresses are permitted to speak for someone else. Defaults
+      # to the private and loopback ranges, which covers a reverse proxy on the
+      # same LAN or another host on the same private network. Set this to the
+      # proxy's address if it reaches this app across a public network, and keep
+      # it as tight as the deployment allows: anything listed here can forge the
+      # client IP that the login throttle relies on.
+      internal-proxies: ${CALENDARSYNC_TRUSTED_PROXIES:192.168.0.0/16,172.16.0.0/12,169.254.0.0/16,fc00::/7,10.0.0.0/8,100.64.0.0/10,127.0.0.0/8,fe80::/10,::1/128}
+  servlet:
+    session:
+      cookie:
+        http-only: true
+        # Lax rather than Strict: the OAuth providers send the user back via a
+        # top-level cross-site GET redirect, which Strict would strip the
+        # session cookie from, breaking the callback.
+        same-site: lax
+
+vaadin:
+  launch-browser: false
+
+logging:
+  level:
+    root: INFO
+    com.sykessec.calendarsync: INFO
+  # Only consulted when calendarsync.logging.destination is "file"; the
+  # profiles override the path so dev writes under ./data and prod under the
+  # /data volume. Boot exports this to logback as ${LOG_FILE}.
+  file:
+    name: ./data/logs/calendarsync.log
+  logback:
+    rollingpolicy:
+      # Boot's own default here is 0, i.e. unbounded, which on a self-hosted box
+      # means logs quietly compete with the SQLite database for the same disk.
+      total-size-cap: 1GB
+      max-file-size: 10MB
+      max-history: 7
+
+# Application-specific configuration - see com.sykessec.calendarsync.config.AppProperties.
+# NOTE: this Spring profile (dev/prod, chosen via SPRING_PROFILES_ACTIVE) is a
+# separate mechanism from the Maven build profile (dev/prod, chosen via -P) that
+# selects which SQLite JDBC driver jar gets packaged. The two must be kept in
+# sync manually when deploying: build with -Pprod, run with SPRING_PROFILES_ACTIVE=prod.
+calendarsync:
+  base-url: http://localhost:8080
+  db:
+    encrypted: false
+  # Picks the ONE appender the root logger gets - see logback-spring.xml.
+  # console: human-readable stdout (Boot's usual output)
+  # file:    rolling plain text at logging.file.name, above
+  # elastic: ECS JSON over TCP to the Logstash/Elastic Agent input below
+  logging:
+    destination: ${CALENDARSYNC_LOG_DESTINATION:console}
+    elastic:
+      host: ${CALENDARSYNC_LOG_ELASTIC_HOST:localhost}
+      port: ${CALENDARSYNC_LOG_ELASTIC_PORT:5044}
+      tls: ${CALENDARSYNC_LOG_ELASTIC_TLS:false}
+  retention:
+    enabled: false
+    days: 90
+  google:
+    client-id: ${GOOGLE_OAUTH_CLIENT_ID:}
+    client-secret: ${GOOGLE_OAUTH_CLIENT_SECRET:}
+  microsoft:
+    client-id: ${MS_OAUTH_CLIENT_ID:}
+    client-secret: ${MS_OAUTH_CLIENT_SECRET:}
+    tenant-id: ${MS_OAUTH_TENANT_ID:common}

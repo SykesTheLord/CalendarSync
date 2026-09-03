@@ -1,0 +1,76 @@
+target/
+*.class
+
+# Vaadin dev-mode auto-generates these - everything else under
+# src/main/frontend/ (e.g. themes/) is hand-authored and tracked.
+src/main/frontend/index.html
+src/main/frontend/generated/
+
+# Vaadin's pre-compiled dev-mode frontend bundle, rebuilt automatically
+# whenever frontend/theme inputs change - regenerating on demand is cheaper
+# than carrying its binary diffs in every commit that touches the theme.
+src/main/bundles/
+
+# Written into the PROJECT ROOT by vaadin-maven-plugin's build-frontend goal,
+# which runs npm there whenever the real theme has to be compiled - i.e. on
+# every local `mvn -Pprod package`, the command the native install documents.
+# None of it existed while Stage 4's prod build was still falling back to the
+# prebuilt vaadin-prod-bundle, which is why the list is only being added now.
+# If a hand-authored package.json or tsconfig.json is ever introduced here,
+# un-ignore that one file - Vaadin merges its additions into a customised one.
+node_modules/
+package.json
+package-lock.json
+pnpm-lock.yaml
+pnpmfile.js
+.npmrc
+vite.config.ts
+vite.generated.ts
+tsconfig.json
+types.d.ts
+
+.idea/
+*.iml
+.vscode/
+
+# Machine-specific Claude Code overrides. The rest of .claude/ (hooks, skills,
+# shared settings) is project tooling and belongs in the repository.
+.claude/settings.local.json
+
+# The dev SQLite database and anything beside it. Anchored to the repository
+# root so a future src/test/resources/data/ fixture directory is not silently
+# ignored along with it.
+/data/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Real configuration, as opposed to the .example files that document it. Both
+# the Compose .env and the native install's environment file hold
+# CALCLEANER_DB_KEY, which is the whole-database encryption key: committing one
+# publishes every encrypted row it protects, and there is no way to re-key.
+.env
+.env.*
+!.env.example
+deploy/calendarsync.env
+.envrc
+
+.flattened-pom.xml
+*.log
+
+# JVM heap dumps. Ordinary build noise everywhere else, but a dump of THIS
+# application contains CALCLEANER_DB_KEY, the decrypted calendar contents and
+# any OAuth refresh token held in memory at the time.
+*.hprof
+
+# Browser network captures: a HAR of a logged-in session contains the
+# JSESSIONID cookie, and feed URLs carry their own access tokens.
+*.har
+
+# TLS material for the example proxy config. Ignore the directory's contents
+# outright rather than by extension - a private key arrives as .pem, .key,
+# .p12 or .jks depending on who generated it - while keeping the directory
+# itself in the repository.
+nginx/certs/*
+!nginx/certs/.gitkeep

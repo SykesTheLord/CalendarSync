@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  destination=file: rolling plain-text file, reusing Boot's own file appender
+  so the whole logging.logback.rollingpolicy.* property family (max-file-size,
+  max-history, total-size-cap, clean-history-on-start, file-name-pattern) keeps
+  working exactly as documented upstream. The file itself comes from
+  logging.file.name; see application.yml for the defaults this app sets.
+-->
+<included>
+    <include resource="org/springframework/boot/logging/logback/file-appender.xml"/>
+
+    <root level="INFO">
+        <appender-ref ref="FILE"/>
+    </root>
+</included>
