@@ -29,11 +29,13 @@ deviates from the original spec and why.
 - [Publishing a feed (including pointing Proton at one)](#publishing-a-feed-including-pointing-proton-at-one)
   - [Export settings](#export-settings)
 - [Trash and restore](#trash-and-restore)
+- [Two-factor authentication](#two-factor-authentication)
 - [Admin: creating additional users](#admin-creating-additional-users)
 - [Deploying with Docker](#deploying-with-docker)
   - [Autostart on reboot](#autostart-on-reboot)
   - [Exposing port 8080 safely](#exposing-port-8080-safely)
 - [Native install (Ubuntu)](#native-install-ubuntu)
+- [Updating an install](#updating-an-install)
 - [Environment variables](#environment-variables)
 - [Logging](#logging)
 - [Encryption](#encryption)
@@ -287,6 +289,78 @@ window can be enabled via `calendarsync.retention.enabled` /
 snapshot and marks the row `PURGED`, it never deletes the audit row, so
 the historical fact "this was deleted on this date" survives.
 
+## Two-factor authentication
+
+A time-based one-time code (TOTP) in addition to your password. It works with
+any authenticator app and with password managers that store codes - Bitwarden,
+1Password, Aegis, Google Authenticator and the rest.
+
+### Turning it on
+
+**Account -> Two-factor authentication -> Set up.** Scan the QR code, or copy
+the setup key if you are enrolling on the same device you are browsing on, then
+enter the six-digit code your authenticator shows to confirm.
+
+The code is what proves the enrolment worked. Nothing is saved until you enter
+one, so a mis-scanned QR or a closed tab leaves your account exactly as it was.
+
+Immediately afterwards you are shown **ten recovery codes**. Save them
+somewhere separate from your phone. They are stored hashed, so this is the only
+time they can be displayed - if you lose both your authenticator and these
+codes, an administrator has to clear the second factor for you.
+
+### Signing in
+
+Password first, then a second page asking for the code. This two-page shape is
+deliberate: it is what Bitwarden and 1Password are built around - they fill and
+submit your username and password, then offer the stored code on the next page.
+
+Each recovery code works once. Enter one in place of the six-digit code, under
+"Use a recovery code instead".
+
+A code that has been used cannot be used again, even within the thirty seconds
+it stays valid for. If a code is rejected and you are sure it is current, the
+usual cause is the clock on the device generating it having drifted - codes
+from the previous and next thirty-second window are accepted, but no further.
+
+### If you get locked out
+
+An administrator can clear the second factor from **Admin -> Clear 2FA**, which
+also ends that user's signed-in sessions. This is the only route back for
+somebody who has lost their authenticator and their recovery codes.
+
+If the locked-out account is the *only* administrator, there is no in-app route
+back and you will need to edit the database:
+
+```bash
+# stop the app first
+sqlite3 /var/lib/calendarsync/calendarsync.db \
+  "UPDATE app_user SET totp_enabled=0, totp_secret=NULL, totp_required=0 WHERE username='admin';"
+```
+
+Note that under the prod profile the database is encrypted, so `sqlite3` cannot
+open it directly - this works on a dev database. Keeping your recovery codes is
+much the easier path.
+
+### Requiring it
+
+An administrator can mark an account with **Require 2FA**. That account is
+routed to the enrolment page the next time it signs in and cannot use the rest
+of the app until it has enrolled, and cannot switch the second factor off
+afterwards.
+
+This is a prompt rather than a lock: the user has already given the correct
+password and is signed in, so any published feed URLs they already hold keep
+working. It exists to get people enrolled, not to hold off somebody who already
+has the password.
+
+### What it does and does not protect
+
+It protects the login form. A published feed URL is a bearer token in a path
+and is deliberately not behind authentication at all, so subscribed calendar
+apps keep working - two-factor authentication does not change that, and a feed
+URL that has leaked still needs the feed deleting or regenerating.
+
 ## Admin: creating additional users
 
 The **Admin** view (visible only to `ADMIN` users) lets you create and
@@ -517,10 +591,7 @@ the jar for the Willena driver and stops rather than let that happen.
 
 **A host already running the Compose unit.** One machine runs one of the two.
 
-### Upgrading, and getting rid of it
-
-Re-running the installer with a newer jar is the upgrade: it replaces the jar
-and restarts the service, and never rewrites an existing environment file.
+### Getting rid of it
 
 ```bash
 sudo systemctl disable --now calendarsync          # stop and un-enable
@@ -529,6 +600,54 @@ sudo rm -rf /opt/calendarsync
 # /var/lib/calendarsync (the database) and /etc/calendarsync (the key) are
 # left deliberately - removing them is unrecoverable, so it stays a decision.
 ```
+
+## Updating an install
+
+```bash
+sudo ./deploy/update.sh                 # auto-detects native or Docker
+sudo ./deploy/update.sh --dry-run       # show what it would do
+sudo ./deploy/update.sh --jar /tmp/calendarsync.jar
+sudo ./deploy/update.sh --mode docker --dir /opt/calendarsync
+```
+
+Re-running `install-ubuntu.sh` with a newer jar also replaces it and restarts,
+but it does so under a running service, keeps no copy of what it replaced, and
+does not check that the app came back. Use `update.sh` instead once you have
+data worth keeping.
+
+What it does, in order:
+
+1. Works out whether this host runs the native or the Docker install, and
+   refuses to guess if both or neither are present (`--mode` overrides).
+2. Checks the new jar was built with `-Pprod`. A `-Pdev` jar carries the wrong
+   SQLite driver: it cannot open an encrypted database, and what it does
+   instead is write a **plaintext** one to a filename containing your database
+   key. This is the single most important check in the script.
+3. Refuses a jar byte-identical to the installed one, so you do not take an
+   outage for nothing (`--force` overrides).
+4. Stops the service and **waits until it has really stopped** - a SQLite file
+   copied out from under a running writer can be torn.
+5. Backs up the database and the current jar to
+   `/var/lib/calendarsync/backups/<timestamp>/` (the Docker path tars the
+   `/data` volume instead). The five most recent backups are kept.
+6. Installs the new jar and starts the service.
+7. Polls `http://<address>:8080/login` for up to two minutes. A 200 there means
+   Flyway migrated, the Spring context started and Vaadin is serving -
+   `systemctl is-active` alone does not, because it reports success as soon as
+   the JVM starts, which is before any of that.
+8. **If it does not come up, restores both the jar and the database** and
+   starts the previous version again, printing the last 50 log lines first.
+
+That last point is why the script exists. Database migrations only run forwards
+and are validated at startup, so an older jar against a database a newer one
+has already migrated will not start at all. Putting the jar back without the
+database produces a service that looks rolled back and then fails on its next
+restart.
+
+**The backups contain your calendar database.** Under the prod profile it is
+encrypted with `CALCLEANER_DB_KEY`, so it is exactly as sensitive as the live
+file and no more - but it is still a copy of everything, sitting in a directory
+that grows over time.
 
 ## Environment variables
 

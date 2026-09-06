@@ -1,11 +1,16 @@
 package com.sykessec.calendarsync.ui.account;
 
+import com.sykessec.calendarsync.entity.AppUser;
+import com.sykessec.calendarsync.repository.AppUserRepository;
 import com.sykessec.calendarsync.security.CurrentUser;
+import com.sykessec.calendarsync.service.TwoFactorService;
 import com.sykessec.calendarsync.service.UserAdminService;
 import com.sykessec.calendarsync.ui.MainLayout;
 import com.sykessec.calendarsync.ui.ViewHeader;
+import com.vaadin.flow.component.UI;
 import com.vaadin.flow.component.button.Button;
 import com.vaadin.flow.component.button.ButtonVariant;
+import com.vaadin.flow.component.html.H3;
 import com.vaadin.flow.component.html.Paragraph;
 import com.vaadin.flow.component.icon.VaadinIcon;
 import com.vaadin.flow.component.notification.Notification;
@@ -28,7 +33,8 @@ import jakarta.annotation.security.PermitAll;
 @PermitAll
 public class AccountView extends VerticalLayout {
 
-    public AccountView(UserAdminService userAdminService, CurrentUser currentUser) {
+    public AccountView(UserAdminService userAdminService, CurrentUser currentUser,
+                       AppUserRepository appUserRepository, TwoFactorService twoFactorService) {
         PasswordField current = new PasswordField("Current password");
         PasswordField updated = new PasswordField("New password");
         updated.setHelperText("At least " + UserAdminService.MIN_PASSWORD_LENGTH + " characters.");
@@ -64,9 +70,46 @@ public class AccountView extends VerticalLayout {
         card.addClassName("cs-card");
         card.setWidth(null);
 
+        AppUser user = appUserRepository.findById(currentUser.id()).orElse(null);
+
         add(new ViewHeader(VaadinIcon.USER, "Account",
                         "Signed in as " + currentUser.principal().getUsername() + "."),
                 new Paragraph("Changing your password does not sign you out of this session."),
-                card);
+                card,
+                twoFactorCard(user, twoFactorService));
+    }
+
+    /**
+     * Status and a way through to the setup view, rather than the enrolment
+     * itself: enrolling needs a QR code, a confirmation step and a one-time
+     * display of ten recovery codes, which is a page rather than a panel.
+     */
+    private VerticalLayout twoFactorCard(AppUser user, TwoFactorService twoFactorService) {
+        VerticalLayout card = new VerticalLayout();
+        card.addClassName("cs-card");
+        card.setWidth(null);
+        card.add(new H3("Two-factor authentication"));
+
+        boolean enabled = user != null && user.isTotpEnabled();
+        if (enabled) {
+            card.add(new Paragraph("On. "
+                    + twoFactorService.remainingRecoveryCodes(user.getId())
+                    + " of " + TwoFactorService.RECOVERY_CODE_COUNT + " recovery codes remain."));
+        } else if (user != null && user.isTotpRequired()) {
+            card.add(new Paragraph("An administrator requires two-factor authentication on this account. "
+                    + "You will be asked to set it up the next time you sign in."));
+        } else {
+            card.add(new Paragraph("Off. Your account is protected by its password alone. "
+                    + "Adding a code from your phone or password manager means a stolen password "
+                    + "is not enough on its own."));
+        }
+
+        Button manage = new Button(enabled ? "Manage" : "Set up two-factor authentication",
+                e -> UI.getCurrent().navigate(TwoFactorSetupView.class));
+        if (!enabled) {
+            manage.addThemeVariants(ButtonVariant.LUMO_PRIMARY);
+        }
+        card.add(manage);
+        return card;
     }
 }

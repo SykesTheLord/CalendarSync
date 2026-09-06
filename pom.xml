@@ -44,6 +44,15 @@
              second, Jackson 2 databind in alongside it. -->
         <logstash.logback.version>9.0</logstash.logback.version>
 
+        <!-- Two-factor authentication: the enrolment QR code.
+             zxing CORE ONLY, deliberately - the companion zxing-javase artifact
+             renders through BufferedImage/ImageIO, which drags the java.desktop
+             module into a headless server to draw a grid of squares. TotpQrCode
+             turns the BitMatrix into SVG instead, which is a dozen lines and
+             scales cleanly on a phone screen. core has no runtime dependencies
+             of its own; verified on Maven Central before adding. -->
+        <zxing.version>3.5.4</zxing.version>
+
         <!-- Code quality. Checkstyle core is pinned separately from its Maven
              plugin because the plugin ships an older core by default, and only
              recent cores parse the Java 21+ syntax (records, pattern switch)
@@ -120,6 +129,13 @@
                     <artifactId>sqlite-jdbc</artifactId>
                 </exclusion>
             </exclusions>
+        </dependency>
+
+        <!-- QR encoding for TOTP enrolment. See the zxing.version comment. -->
+        <dependency>
+            <groupId>com.google.zxing</groupId>
+            <artifactId>core</artifactId>
+            <version>${zxing.version}</version>
         </dependency>
 
         <!-- Stage 1: ical4j for ICS parsing/generation (CalDAV event bodies now;

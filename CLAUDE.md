@@ -46,12 +46,14 @@ These encode bugs that actually shipped. Breaking one fails open, usually silent
 - **Every Vaadin view *and every parent layout* needs an access annotation** (`@PermitAll`, `@RolesAllowed`, `@AnonymousAllowed`). An unannotated layout is treated as more restrictive than its annotated children and silently denies everyone — this is why `MainLayout` carries `@PermitAll`.
 - **`TrashService.deleteWithSnapshot` is the only path allowed to call a provider's `deleteEvent`.** A committed `deletion_audit` row must exist before the remote delete. Feed-side exclusions go through `TrashService.recordFeedExclusion`.
 - `GET /feed/{token}.ics` is `permitAll` — **the token in the URL is the credential.** `IcsFeedController` checks the owning user by hand and returns **404, not 403**, for a missing feed or disabled owner.
+- **The second factor is verified by a Spring Security filter, never in a Vaadin listener.** `SecondFactorAuthenticationProvider` behind a `ProviderManager` is what publishes the auth events `AuthenticationEventLogger` turns into `LoginAttemptService` throttling; verified anywhere else, a 6-digit code is unrate-limited. That `ProviderManager` needs `setAuthenticationEventPublisher` set by hand, and the provider must **not** be a `@Component` — an `AuthenticationProvider` bean stops Boot auto-configuring `DaoAuthenticationProvider` and breaks *every* password login.
+- **`TwoFactorAwareSuccessHandler` invalidates the session between the two login steps**, rather than clearing `SecurityContextHolder`: the `SecurityContext` is already persisted by the time a success handler runs, so clearing alone leaves an authenticated session and the second factor becomes skippable. It is installed via `http.setSharedObject(VaadinSavedRequestAwareAuthenticationSuccessHandler.class, …)` because `VaadinSecurityConfigurer` overwrites `formLogin().successHandler(...)` at build time — and because that suppresses Vaadin's own handler, the default target URL and request cache must be set on it directly.
 - Every Microsoft Graph call site must wrap the SDK's unchecked `ApiException` into `ProviderException`, or `ConnectionSyncJob`'s error bookkeeping is skipped.
 - All server-supplied CalDAV URIs must go through `CalDavUris` (same-site check, no https→http downgrade) — credentials are attached to every request.
 
 ## Testing
 
-JUnit 5 + AssertJ + Mockito. No Testcontainers, no integration/unit split — `mvn test` runs everything.
+JUnit 5 + AssertJ. No Testcontainers, no integration/unit split — `mvn test` runs everything. **Mockito is on the classpath but nothing uses it**: the house substitute for a mock is a hand-written stub registered via `@TestConfiguration` (see `TrashServiceIntegrationTest`) or plain construction. Tests that cross an HTTP boundary use `java.net.http.HttpClient` against `@LocalServerPort`.
 
 - Integration tests extend `AbstractIntegrationTest`, which points the DB at one JVM-lifetime temp dir via `@DynamicPropertySource`. Deliberately not `@TempDir`: Spring's context cache key ignores the dynamic property's value, so a per-class temp dir leaves later classes on a deleted file.
 - `AccountDeactivationTest` is intentionally **not** `@Transactional` — its feed request arrives over real HTTP on another thread.
@@ -66,6 +68,10 @@ JUnit 5 + AssertJ + Mockito. No Testcontainers, no integration/unit split — `m
 - Constructor injection with `private final` fields. `@Autowired` field injection appears only in the two Quartz `Job` classes, which Quartz instantiates by no-arg constructor.
 - Records for value/DTO types.
 - **House comment style is explanatory**: class and method javadoc states *why* a non-obvious choice was made, usually naming the failure mode it prevents. Match it — the existing comments are the project's design record.
+
+## Updating an install
+
+`deploy/update.sh` (native or Docker, auto-detected). The installer replaces a jar under a running service with no backup; the updater stops the service, copies the database, and **rolls the jar and the database back together** on failure — Flyway is forward-only and validates at startup, so an old jar against a migrated database refuses to start. Health is `GET /login` returning 200, not `systemctl is-active`: `Type=exec` reports active before Flyway has run.
 
 ## Docker build
 
@@ -97,6 +103,18 @@ Conditions are `field operator value`; each `RuleField` has one evaluator declar
 - **Supported-operator sets are `EnumSet`, not `Set.of`.** The picker lists them in iteration order, and `EnumSet` iterates in `RuleOperator` declaration order — which is what keeps each negated operator beside the one it negates. Declaration order is free to change (`EnumType.STRING` everywhere, no ordinals persisted).
 - **A negated operator inverts the whole match, never the per-candidate test.** ATTENDEE is multi-valued, so `NOT_CONTAINS` must mean "no attendee matches"; inverting inside the lambda silently means "some attendee doesn't match", which is true of almost every multi-attendee event. Use `RuleOperator.positiveForm()` + `isNegated()`.
 - **An absent field satisfies a negated operator** (a null title becomes `""`, which contains nothing). Correct, and the surprising part of a DELETE rule — `UiLabels.negationCaveat` surfaces it in the operator picker.
+
+## Two-factor authentication
+
+RFC 6238 TOTP, opt-in per user with an admin `totp_required` flag, plus ten
+single-use recovery codes (V5). Login is two steps: `/login` then `/login/verify`.
+
+- **SHA-1 / 6 digits / 30s is an interoperability requirement, not a default.** Some authenticators ignore the `otpauth://` `algorithm=` parameter and compute SHA-1 regardless, so emitting SHA256 produces an enrolment that scans and then never validates. Don't "upgrade" it.
+- `totp_last_step` is replay protection — a code is valid for up to 90s, so verification requires a strictly greater step. Confirming an enrolment consumes that step, which is why tests enrol with the *previous* step's code.
+- Recovery codes are SHA-256, not bcrypt: they are checked against up to ten rows on a pre-auth endpoint, and they carry 50 bits from `SecureRandom`, so a slow hash only buys a CPU-exhaustion vector.
+- The verify page uses **native `com.vaadin.flow.component.html.Input` fields inside a `@Tag("form")` container** — a Vaadin `TextField` is not reliably form-associated, so a real POST would submit nothing. `autocomplete="one-time-code"` is what password managers key off.
+- `/login/verify` is **not** covered by Vaadin's CSRF exemption (which is only its own requests plus `/login`), so the view renders the token as a hidden field.
+- Forced enrolment (`ForcedEnrolmentInitializer`) is a UI prompt, not a containment boundary — the user is already authenticated. Say so if you change it.
 
 ## Feed output
 

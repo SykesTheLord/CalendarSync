@@ -263,4 +263,19 @@ public final class UiLabels {
     public static String yesNo(boolean value) {
         return value ? "Yes" : "No";
     }
+
+    /**
+     * A user's two-factor state as one word for the admin grid.
+     *
+     * "Required" beats "Off" deliberately: an account an administrator has
+     * marked as mandatory but which has not enrolled yet is the state worth
+     * seeing at a glance, and showing it as plain "Off" hides exactly the rows
+     * somebody is looking for.
+     */
+    public static String twoFactorState(boolean enabled, boolean required) {
+        if (enabled) {
+            return required ? "On (required)" : "On";
+        }
+        return required ? "Required - not yet set up" : "Off";
+    }
 }

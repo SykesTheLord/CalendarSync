@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.context.event.EventListener;
 import org.springframework.security.authentication.event.AbstractAuthenticationFailureEvent;
 import org.springframework.security.authentication.event.AuthenticationSuccessEvent;
+import org.springframework.security.core.Authentication;
 import org.springframework.stereotype.Component;
 
 /**
@@ -31,8 +32,34 @@ public class AuthenticationEventLogger {
     @EventListener
     public void onSuccess(AuthenticationSuccessEvent event) {
         String address = loginAttemptService.currentClientAddress();
-        loginAttemptService.recordSuccess(address);
-        log.info("Login succeeded for '{}' from {}", event.getAuthentication().getName(), address);
+        Authentication authentication = event.getAuthentication();
+
+        // Only a login that is actually FINISHED clears the failure counter.
+        // With a second factor configured, the password step also publishes a
+        // success event, and treating that as a completed login would reset the
+        // counter on every attempt - leaving an attacker who already has the
+        // password free to guess six-digit codes one per login, forever,
+        // without ever reaching MAX_FAILURES. The throttle would still look
+        // green while protecting nothing, which is the exact failure this
+        // class exists to prevent.
+        if (isComplete(authentication)) {
+            loginAttemptService.recordSuccess(address);
+            log.info("Login succeeded for '{}' from {}", authentication.getName(), address);
+        } else {
+            log.info("Password accepted for '{}' from {}, awaiting second factor",
+                    authentication.getName(), address);
+        }
+    }
+
+    private boolean isComplete(Authentication authentication) {
+        if (authentication instanceof SecondFactorCompletedAuthentication) {
+            return true;
+        }
+        // Read off the principal's snapshot rather than the database: it was
+        // loaded moments ago by this same login, and a query here would run on
+        // every authentication in the application.
+        return !(authentication.getPrincipal() instanceof AppUserPrincipal principal)
+                || !principal.getUser().isTotpEnabled();
     }
 
     @EventListener

@@ -36,6 +36,33 @@ public class AppUser {
     @Column(name = "created_at", nullable = false)
     private String createdAt;
 
+    /**
+     * The TOTP shared secret, encrypted by TotpSecretCipher. Present but
+     * unconfirmed during enrolment is impossible by construction: nothing
+     * writes this column until a code generated from it has been verified,
+     * so a half-finished enrolment cannot lock anybody out.
+     */
+    @Column(name = "totp_secret")
+    private byte[] totpSecret;
+
+    @Column(name = "totp_enabled", nullable = false)
+    private boolean totpEnabled;
+
+    /** Admin-set. Independent of totpEnabled - see TwoFactorService. */
+    @Column(name = "totp_required", nullable = false)
+    private boolean totpRequired;
+
+    @Column(name = "totp_confirmed_at")
+    private String totpConfirmedAt;
+
+    /**
+     * The last time step accepted for this user. A code is valid across three
+     * steps, so without this a code seen once can be replayed for up to 90
+     * seconds; verification requires a strictly greater step than this one.
+     */
+    @Column(name = "totp_last_step")
+    private Long totpLastStep;
+
     @PrePersist
     void prePersist() {
         if (createdAt == null) {
@@ -81,5 +108,45 @@ public class AppUser {
 
     public String getCreatedAt() {
         return createdAt;
+    }
+
+    public byte[] getTotpSecret() {
+        return totpSecret;
+    }
+
+    public void setTotpSecret(byte[] totpSecret) {
+        this.totpSecret = totpSecret;
+    }
+
+    public boolean isTotpEnabled() {
+        return totpEnabled;
+    }
+
+    public void setTotpEnabled(boolean totpEnabled) {
+        this.totpEnabled = totpEnabled;
+    }
+
+    public boolean isTotpRequired() {
+        return totpRequired;
+    }
+
+    public void setTotpRequired(boolean totpRequired) {
+        this.totpRequired = totpRequired;
+    }
+
+    public String getTotpConfirmedAt() {
+        return totpConfirmedAt;
+    }
+
+    public void setTotpConfirmedAt(String totpConfirmedAt) {
+        this.totpConfirmedAt = totpConfirmedAt;
+    }
+
+    public Long getTotpLastStep() {
+        return totpLastStep;
+    }
+
+    public void setTotpLastStep(Long totpLastStep) {
+        this.totpLastStep = totpLastStep;
     }
 }

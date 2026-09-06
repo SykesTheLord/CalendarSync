@@ -771,6 +771,288 @@ whatever OAuth refresh tokens were live at the time.
 of the Claude Code config. The hooks, skills and shared settings beside it are
 project tooling and stay tracked.
 
+## Two-factor authentication (TOTP)
+
+RFC 6238 codes as a second factor, opt-in per user with an admin "required"
+flag, ten single-use recovery codes, and an admin reset for somebody locked
+out. Login becomes two steps: password, then code. `V5` adds five columns to
+`app_user` and one `totp_recovery_code` table.
+
+**The parameters are an interoperability requirement, not a default nobody
+revisited.** SHA-1, six digits, thirty seconds, 160-bit secret. The
+`otpauth://` Key Uri Format has `algorithm`, `digits` and `period` parameters
+and it is tempting to read `algorithm=SHA256` as a free upgrade, but a number
+of authenticators and password managers ignore that parameter and compute
+SHA-1 regardless. A server that emits SHA256 and validates SHA256 produces an
+enrolment that scans perfectly, displays a plausible code, and never
+validates - which presents to the user as a clock problem and is close to
+undebuggable over a support channel. This is not a claim that SHA-1 is
+preferable; HMAC-SHA-1 is unaffected by the collision attacks that retired
+bare SHA-1, and the interoperable set is the one every implementation agrees
+on.
+
+**Hand-written TOTP and base32 rather than a library, and rather than the
+commons-codec already on the classpath.** The whole algorithm is one HMAC and
+a truncation. commons-codec *is* present, but only transitively via the Google
+HTTP client - an undeclared dependency that an unrelated upgrade can drop, and
+the failure would land on the path that decides whether people can log in.
+`TotpTest` pins the implementation to RFC 6238's own published vectors, and
+each vector exercises a different truncation offset, so a subtle error in the
+counter packing or the dynamic truncation fails all six rather than none.
+
+**The success handler is installed as a Vaadin *shared object*, and that is
+not a workaround for the sake of it.** `VaadinSecurityConfigurer` configures
+form login inside its own `init()`, which runs at `http.build()` - i.e. after
+the body of `SecurityConfig`'s `filterChain` bean has returned. So
+`http.formLogin(f -> f.successHandler(...))` there is silently overwritten
+moments later. Reading the configurer's bytecode shows it resolves its handler
+as `getSharedObject(VaadinSavedRequestAwareAuthenticationSuccessHandler.class)
+.orElseGet(this::createAuthenticationSuccessHandler)`, so registering an
+instance of that type as a shared object is the supported way in.
+
+The consequence is worth remembering: supplying the shared object means Vaadin
+never calls `createAuthenticationSuccessHandler()`, which is what would
+otherwise have applied `defaultSuccessUrl(...)` and the request cache. Both are
+now set on the handler instance, and `VaadinSecurityConfigurer.defaultSuccessUrl()`
+has been removed from the chain rather than left there looking effective. Left
+in, it would be dead configuration that the next person changes and then spends
+an afternoon wondering about.
+
+**The session is destroyed between the two steps, not merely cleared.**
+`AbstractAuthenticationProcessingFilter` has already written the
+`SecurityContext` through the `SecurityContextRepository` by the time a success
+handler runs. Clearing `SecurityContextHolder` therefore leaves a fully
+authenticated session persisted on the server while the user is looking at a
+"enter your code" page - the second factor would be skippable by requesting any
+other URL. Invalidating the session takes the stored context with it and
+rotates the session id into the bargain. `TwoFactorLoginTest` asserts that
+`/connections` still bounces to `/login` after the password step, which is the
+test that would catch a regression to the clearing version.
+
+**The second factor is a real `AuthenticationProvider` behind a
+`ProviderManager`, not a few lines in a Vaadin click listener.** That is what
+makes `ProviderManager` publish `AuthenticationSuccessEvent` and
+`AuthenticationFailureBadCredentialsEvent` - the only thing
+`AuthenticationEventLogger` listens to, and therefore the only thing feeding
+`LoginAttemptService`. Verified anywhere else, a six-digit code is unthrottled,
+and 10^6 is a couple of hours of unattended guessing. Two traps came out of
+this, both of which fail silently:
+
+- A `ProviderManager` constructed by hand gets a `NullEventPublisher`. It has
+  to be given `setAuthenticationEventPublisher(new DefaultAuthenticationEventPublisher(...))`
+  or it logs and throttles nothing while looking entirely correct.
+  `TwoFactorLoginTest.failedCodesFeedTheLoginThrottle` exists for that one line.
+- **`SecondFactorAuthenticationProvider` must not be a `@Component`.** Spring
+  Boot's `InitializeUserDetailsManagerConfigurer` stops auto-configuring a
+  `DaoAuthenticationProvider` from the `UserDetailsService` the moment *any*
+  `AuthenticationProvider` bean exists. Publishing it as a bean left the global
+  `AuthenticationManager` holding only a provider that does not support
+  `UsernamePasswordAuthenticationToken`, so **every password login in the
+  application failed** with `ProviderNotFoundException` - which surfaces as an
+  ordinary "bad credentials" redirect and so reads as a wrong password rather
+  than a broken configuration. Caught by an integration test on the *no-2FA*
+  path, not by anything to do with 2FA. `SecurityConfig` constructs it by hand.
+
+**A successful password no longer clears the brute-force counter on its own,
+and this was a real hole rather than tidying.** `AuthenticationEventLogger`
+called `recordSuccess` on every `AuthenticationSuccessEvent`. With a second
+factor configured the password step also publishes one, so each attempt reset
+the counter: an attacker who already had the password could guess codes one per
+login, indefinitely, and never reach `MAX_FAILURES`. The throttle stayed green
+while protecting nothing - the precise failure the class was written to
+prevent. The counter is now cleared only for a *completed* login, which
+`SecondFactorCompletedAuthentication` marks.
+
+**Replay protection: `totp_last_step`.** A code is valid across the current
+step and one either side, i.e. up to ninety seconds. Without recording the
+accepted step, a code observed once - over a shoulder, in a screen share, in a
+proxy log that captured a POST body - is replayable for the rest of that window.
+Verification requires a strictly greater step than the last accepted one.
+Confirmed on the wire as well as in tests: the same code, verified as still
+current by recomputing it afterwards, was accepted once and refused on reuse.
+
+A side effect worth knowing when reading the tests: confirming an enrolment
+consumes the step it used, so a test that enrols with the current code cannot
+then sign in with it. The helpers enrol with the *previous* step's code, which
+is also what a real user typing the last code before it rolls over produces.
+
+**Recovery codes are SHA-256, not bcrypt.** Checking a submitted code means
+testing it against every unused row for that user, on an endpoint reachable
+before authentication completes; ten bcrypt comparisons per guess is about a
+second of CPU an unauthenticated caller can spend at will. bcrypt's cost exists
+to protect secrets a human chose badly - these are ten characters from a
+32-character alphabet generated by `SecureRandom`, i.e. 50 bits, so there is no
+dictionary to slow down and nothing to gain in exchange for the availability.
+They are consumed by setting `used_at` rather than by deletion, so "how many
+are left" is answerable and "never had any" is distinguishable from "burned
+them all".
+
+**The verify page uses native HTML inputs, and that is the point.** Vaadin's
+`TextField` does put its inner `<input>` in light DOM where a password manager
+can see it, but it carries no `name` attribute and is not reliably
+form-associated, so a real browser form submit posts nothing - and the submit
+has to be real, because a Spring Security filter is what processes it. So the
+form is a `@Tag("form")` container (`flow-html-components` has `Input` and
+`NativeButton` but no form element) holding
+`com.vaadin.flow.component.html.Input` fields, with
+`autocomplete="one-time-code"`, `inputmode="numeric"` and `autofocus`. The
+two-page shape is deliberate for the same reason: it is the flow Bitwarden and
+1Password are built around - they fill and submit username and password on the
+first page, then offer the stored code on the second.
+
+**`/login/verify` carries a real CSRF token.** Vaadin's configurer exempts
+exactly two things from CSRF - its own internal requests, and the form-login
+page path - which is why `LoginForm.setAction("login")` works without one. A
+new path is not exempt, so `TwoFactorVerifyView` renders the token as a hidden
+field. Confirmed on the wire: a POST without it is refused and the session
+stays unauthenticated.
+
+One consequence surfaced while testing. A Vaadin view is built client-side, so
+the hidden field does not exist in the bootstrap HTML an HTTP client receives -
+only in the DOM after the browser has run the client engine. `TwoFactorLoginTest`
+therefore reads the same session token out of the `<meta name="_csrf">` tag
+Vaadin writes into every bootstrap page. That is the token the form field would
+carry, so the test exercises the real check rather than routing around it.
+
+**One guess per password step.** The pending record is consumed in
+`attemptAuthentication` before verification is attempted, so a wrong code costs
+a fresh password login to try again. Without that, a pending session is a
+standing permit to keep guessing and the rate limiter is arguing with a loop.
+Observed directly: a wrong code redirects to `?error`, and retrying with the
+correct code against the same pending record gets `?expired`.
+
+**The forced-enrolment gate is a prompt, not a containment boundary, and the
+comments say so.** A user marked required but not yet enrolled has given the
+correct password and *is* fully authenticated; `ForcedEnrolmentInitializer`
+reroutes their Vaadin navigation to the setup view, but feed tokens they
+already hold keep working and a non-Vaadin endpoint is still reachable by
+typing its URL. Making it a real boundary would mean withholding authentication
+until enrolment completes, which locks people out of the very page that would
+fix it. The security boundary in this feature is the second factor demanded of
+users who *have* enrolled, and that one is enforced in the authentication layer
+where it cannot be walked around.
+
+Its wiring is two lines of stock Vaadin API; the decision it makes is a static
+method with its own test. That split is deliberate - constructing a real
+`BeforeEnterEvent` needs a router and a UI, and testing the framework's own
+listener dispatch would not be testing this feature. **This is the one part of
+the work not verified end-to-end without a browser**, and it is recorded as
+such rather than implied to be covered.
+
+**QR codes: zxing core only, rendered to SVG.** The companion `zxing-javase`
+artifact writes through `BufferedImage`/`ImageIO`, i.e. the `java.desktop`
+module - a lot of desktop graphics stack to carry in a headless server image in
+order to draw black squares. A `BitMatrix` is already a grid of booleans, so
+one `<path>` segment per horizontal run of dark modules is a dozen lines and
+scales without going blurry on a phone. `core` has no runtime dependencies of
+its own. `TotpQrCodeTest` reconstructs the module grid from the generated SVG
+and decodes it with zxing's own reader: asserting that the SVG "contains a
+path" would pass for a QR code no phone can scan. The white background is
+painted explicitly because an inverted QR code does not scan and this app has a
+dark theme.
+
+Delivered as a `data:` URI rather than from an endpoint. A new MVC endpoint
+would need its own `authorizeHttpRequests` rule or `VaadinSecurityConfigurer`
+answers it with a bare 403 (the trap the `/oauth2/**` rule already documents),
+would need its own authorization so one user cannot fetch another's QR, and
+would put a TOTP secret in a URL that can reach an access log.
+
+**The candidate secret lives in the Vaadin session until a code confirms it.**
+Writing it to `app_user` first and flipping a flag afterwards is simpler, but a
+mis-scanned QR or a closed tab then leaves a row that looks half-enrolled - and
+the failure mode for getting second-factor state wrong is somebody locked out of
+their own account. It is held rather than regenerated per render so that a page
+refresh does not swap the secret under a QR the user has already scanned.
+
+**Switching 2FA off requires the account password.** Everything else in
+`AccountView` is reachable by whoever holds the session, but a stolen session
+that can silently strip the second factor makes the second factor decorative -
+the attacker removes it and keeps the password they already have.
+
+**`TotpSecretCipher` mirrors `CredentialCipher` with a `"totp"` context**, so
+the secret is keyed differently from connection credentials while still coming
+from the one `CALCLEANER_DB_KEY` the operator manages. It inherits that class's
+honest limitation: with `calendarsync.db.encrypted=false` (the dev profile) it
+is a passthrough and the secret is stored in cleartext, exactly as connection
+credentials already are. Fine for a dev database, and a reason not to enrol an
+account you care about against one.
+
+**Verified against a running app, not only unit-tested.** Booted on the dev
+profile, logged in over curl with the bootstrap admin password from the boot
+log, and confirmed every view - including the new `/account/two-factor` -
+returns 200 authenticated with no `AnnotatedViewAccessChecker` warning. Then
+enabled 2FA on the account and drove the two-step login on the wire:
+
+| Step | Result |
+|---|---|
+| `POST /login` with the correct password | `302` to `/login/verify` |
+| `GET /connections` holding only that session | `302` to `/login` - the password alone grants nothing |
+| `POST /login/verify` with a valid code | `302` to `/connections`, and `/connections` then returns `200` |
+| the same code again, still inside its 30s step | `302` to `/login/verify?error` |
+| `POST /login/verify` with no CSRF token | refused; session stays unauthenticated |
+| a wrong code, then the right one on the same pending record | `?error`, then `?expired` |
+
+The code in row three was computed by an **independent Python implementation**
+of RFC 6238 rather than by this application's own, so the row is a
+cross-check that a third-party authenticator will interoperate, not a tautology
+about the code agreeing with itself.
+
+## Updating an install
+
+`deploy/update.sh` covers both deployment shapes, auto-detecting which is
+present and refusing to guess when both or neither are.
+
+**It exists because upgrades now carry migrations.** `install-ubuntu.sh` has
+always doubled as an upgrade, but it replaces the jar under a running service,
+keeps no copy of what it replaced, and never checks that the app came back.
+That was survivable while an upgrade was only new code.
+
+**The jar and the database roll back together, always.** This is the reason the
+script exists at all. Flyway is forward-only and validates at startup, so if a
+new version applies a migration and then fails for some unrelated reason,
+restoring only the jar leaves a database at a schema version the old jar has no
+migration for - it refuses to start with "detected applied migration not
+resolved locally". The rollback would appear to have worked and the service
+would fail on its *next* restart instead, which is the worst possible moment to
+discover it.
+
+**The database is copied while the service is genuinely stopped**, polled for
+rather than assumed after `systemctl stop` returns: a SQLite file copied out
+from under a running writer can be torn, and a torn backup is only discovered
+when it is needed. A plain `cp` (plus any `-wal`/`-shm` siblings), **not**
+`sqlite3 .backup` - under the prod profile the file is encrypted by the Willena
+driver, so `sqlite3` cannot open it without the key, and the key must not be put
+on a command line. Free space is checked first, because a backup that runs out
+of disk half way through is the worst of both worlds.
+
+**Health is measured by asking the app for a page, not by `systemctl
+is-active`.** With `Type=exec` systemd reports the unit active the moment the
+JVM execs - long before Flyway has migrated and Tomcat is listening, and a
+migration failure exits *after* that point. There is no actuator, so the check
+is `GET /login`: the one route that answers 200 with no credentials, which
+means a 200 proves the context started, Flyway succeeded and Vaadin is serving.
+Confirmed against the running app.
+
+**The `-Pprod` jar check is reused verbatim from the installer**, and is the
+most important gate in either script - a `-Pdev` jar cannot open an existing
+encrypted database and instead writes a plaintext one to a filename containing
+the key. Confirmed working against this repository's own dev-profile jar, which
+it correctly refuses (Xerial driver, zero `org/sqlite/mc/` entries). The script
+also refuses a jar byte-identical to the installed one, so nobody takes an
+outage for a no-op.
+
+**The Docker path runs `tar` inside the application's own image** rather than
+pulling `alpine`, so a volume backup does not depend on the host having network
+access or on trusting a second image - the app image is by definition already
+present. The volume is emptied before restoring, or a database migrated forward
+would still be sitting there underneath the restored files. It uses `compose
+stop`, never `down`, so it does not fight the Compose unit's `ExecStop`.
+
+The environment file is parsed with `grep`, not sourced: systemd reads it as
+plain `KEY=value`, so sourcing it as shell would execute whatever a value
+happened to look like. Verified against base64 keys containing `/`, `+` and
+`=`, quoted values, and missing keys falling back to defaults.
+
 ## Version substitutions
 
 Checked live against Maven Central during planning and again as each stage

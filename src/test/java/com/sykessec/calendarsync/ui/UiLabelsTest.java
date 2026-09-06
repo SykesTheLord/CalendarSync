@@ -31,4 +31,14 @@ class UiLabelsTest {
 
         assertThat(summary).contains("Out of office (as busy)");
     }
+
+    @Test
+    void namesEveryTwoFactorState() {
+        assertThat(UiLabels.twoFactorState(true, false)).isEqualTo("On");
+        assertThat(UiLabels.twoFactorState(true, true)).isEqualTo("On (required)");
+        assertThat(UiLabels.twoFactorState(false, false)).isEqualTo("Off");
+        // The state an administrator actually needs to spot: told to enrol,
+        // hasn't. Rendering this as plain "Off" would hide it.
+        assertThat(UiLabels.twoFactorState(false, true)).isEqualTo("Required - not yet set up");
+    }
 }

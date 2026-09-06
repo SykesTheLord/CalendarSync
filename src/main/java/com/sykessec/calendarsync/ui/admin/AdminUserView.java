@@ -3,6 +3,7 @@ package com.sykessec.calendarsync.ui.admin;
 import com.sykessec.calendarsync.entity.AppUser;
 import com.sykessec.calendarsync.entity.enums.Role;
 import com.sykessec.calendarsync.security.CurrentUser;
+import com.sykessec.calendarsync.service.TwoFactorService;
 import com.sykessec.calendarsync.service.UserAdminService;
 import com.sykessec.calendarsync.ui.Confirm;
 import com.sykessec.calendarsync.ui.MainLayout;
@@ -33,11 +34,14 @@ import jakarta.annotation.security.RolesAllowed;
 public class AdminUserView extends VerticalLayout {
 
     private final UserAdminService userAdminService;
+    private final TwoFactorService twoFactorService;
     private final CurrentUser currentUser;
     private final Grid<AppUser> grid = new Grid<>(AppUser.class, false);
 
-    public AdminUserView(UserAdminService userAdminService, CurrentUser currentUser) {
+    public AdminUserView(UserAdminService userAdminService, TwoFactorService twoFactorService,
+                         CurrentUser currentUser) {
         this.userAdminService = userAdminService;
+        this.twoFactorService = twoFactorService;
         this.currentUser = currentUser;
 
         setSizeFull();
@@ -46,6 +50,8 @@ public class AdminUserView extends VerticalLayout {
         grid.addColumn(AppUser::getUsername).setHeader("Username").setFlexGrow(1);
         grid.addColumn(u -> UiLabels.of(u.getRole())).setHeader("Role").setAutoWidth(true);
         grid.addColumn(u -> UiLabels.yesNo(u.isEnabled())).setHeader("Enabled").setAutoWidth(true);
+        grid.addColumn(u -> UiLabels.twoFactorState(u.isTotpEnabled(), u.isTotpRequired()))
+                .setHeader("Two-factor").setAutoWidth(true);
         grid.addComponentColumn(this::actionsFor).setHeader("").setFlexGrow(0).setAutoWidth(true);
         grid.setSizeFull();
 
@@ -117,7 +123,37 @@ public class AdminUserView extends VerticalLayout {
         Button reset = new Button("Reset password", e -> openResetDialog(user));
         reset.addThemeVariants(ButtonVariant.LUMO_TERTIARY);
 
-        return new HorizontalLayout(toggle, reset);
+        Button require = new Button(user.isTotpRequired() ? "Don't require 2FA" : "Require 2FA",
+                e -> {
+                    if (run(() -> twoFactorService.setRequired(user.getId(), !user.isTotpRequired()))) {
+                        refresh();
+                    }
+                });
+        require.addThemeVariants(ButtonVariant.LUMO_TERTIARY);
+
+        HorizontalLayout actions = new HorizontalLayout(toggle, reset, require);
+
+        // Only offered where there is something to clear. This is the way back
+        // in for somebody who has lost both their authenticator and their
+        // recovery codes - without it, a self-hosted instance whose only admin
+        // loses their phone needs somebody editing SQLite by hand.
+        if (user.isTotpEnabled()) {
+            Button clear = new Button("Clear 2FA", e -> Confirm.destructive(
+                    self ? "Clear your own two-factor authentication?" : "Clear two-factor authentication?",
+                    (self ? "Your account" : "\"" + user.getUsername() + "\"")
+                            + " will sign in with a password alone until it is set up again, and "
+                            + "any remaining recovery codes stop working. Signed-in sessions end immediately.",
+                    "Clear it",
+                    () -> {
+                        if (run(() -> twoFactorService.clearForUser(user.getId()))) {
+                            refresh();
+                        }
+                    }));
+            clear.addThemeVariants(ButtonVariant.LUMO_TERTIARY, ButtonVariant.LUMO_ERROR);
+            actions.add(clear);
+        }
+
+        return actions;
     }
 
     private void applyEnabled(AppUser user, boolean enabled) {
