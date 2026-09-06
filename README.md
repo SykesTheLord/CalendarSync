@@ -604,11 +604,19 @@ sudo rm -rf /opt/calendarsync
 ## Updating an install
 
 ```bash
-sudo ./deploy/update.sh                 # auto-detects native or Docker
-sudo ./deploy/update.sh --dry-run       # show what it would do
-sudo ./deploy/update.sh --jar /tmp/calendarsync.jar
-sudo ./deploy/update.sh --mode docker --dir /opt/calendarsync
+./deploy/update.sh                    # build, then update whatever is installed
+./deploy/update.sh --skip-tests       # build without running the test suite
+./deploy/update.sh --no-build         # use the newest jar already in target/
+./deploy/update.sh --jar /tmp/cs.jar  # use a jar built somewhere else
+./deploy/update.sh --dry-run          # show what it would do
+./deploy/update.sh --mode docker --dir /opt/calendarsync
 ```
+
+**Run it as yourself, not with `sudo`.** It builds as you - so `target/` and
+`~/.m2` stay yours - and asks for your password once, after the build, for the
+parts that genuinely need root. Building as root leaves root-owned artifacts
+that break your next ordinary `mvn` run. (If you do type `sudo` out of habit it
+still works: the build is handed back to your account via `$SUDO_USER`.)
 
 Re-running `install-ubuntu.sh` with a newer jar also replaces it and restarts,
 but it does so under a running service, keeps no copy of what it replaced, and
@@ -619,23 +627,26 @@ What it does, in order:
 
 1. Works out whether this host runs the native or the Docker install, and
    refuses to guess if both or neither are present (`--mode` overrides).
-2. Checks the new jar was built with `-Pprod`. A `-Pdev` jar carries the wrong
+2. Builds the jar with `mvn -Pprod package`, running the test suite unless you
+   pass `--skip-tests`. This happens **before** it asks for root, so a password
+   prompt can never appear in the middle of the risky part.
+3. Checks the jar was built with `-Pprod`. A `-Pdev` jar carries the wrong
    SQLite driver: it cannot open an encrypted database, and what it does
    instead is write a **plaintext** one to a filename containing your database
    key. This is the single most important check in the script.
-3. Refuses a jar byte-identical to the installed one, so you do not take an
+4. Refuses a jar byte-identical to the installed one, so you do not take an
    outage for nothing (`--force` overrides).
-4. Stops the service and **waits until it has really stopped** - a SQLite file
+5. Stops the service and **waits until it has really stopped** - a SQLite file
    copied out from under a running writer can be torn.
-5. Backs up the database and the current jar to
+6. Backs up the database and the current jar to
    `/var/lib/calendarsync/backups/<timestamp>/` (the Docker path tars the
    `/data` volume instead). The five most recent backups are kept.
-6. Installs the new jar and starts the service.
-7. Polls `http://<address>:8080/login` for up to two minutes. A 200 there means
+7. Installs the new jar and starts the service.
+8. Polls `http://<address>:8080/login` for up to two minutes. A 200 there means
    Flyway migrated, the Spring context started and Vaadin is serving -
    `systemctl is-active` alone does not, because it reports success as soon as
    the JVM starts, which is before any of that.
-8. **If it does not come up, restores both the jar and the database** and
+9. **If it does not come up, restores both the jar and the database** and
    starts the previous version again, printing the last 50 log lines first.
 
 That last point is why the script exists. Database migrations only run forwards
@@ -643,6 +654,15 @@ and are validated at startup, so an older jar against a database a newer one
 has already migrated will not start at all. Putting the jar back without the
 database produces a service that looks rolled back and then fails on its next
 restart.
+
+**Building needs Node, and Vaadin is fussy about which one.** The build only
+compiles the frontend when something has changed, but when it does,
+`vaadin-maven-plugin` substitutes its own Node whenever the one on `PATH` is
+outside the range it supports - which is a *ceiling* as well as a floor, so a
+very new Node triggers it as readily as an old one. The first time that happens
+it fetches a Node distribution over the network mid-build. The script warns
+when it sees either case in the build output; if you would rather not build on
+the server at all, build elsewhere and pass `--jar`.
 
 **The backups contain your calendar database.** Under the prod profile it is
 encrypted with `CALCLEANER_DB_KEY`, so it is exactly as sensitive as the live

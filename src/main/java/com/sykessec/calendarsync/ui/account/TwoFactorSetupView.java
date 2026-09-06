@@ -82,8 +82,13 @@ public class TwoFactorSetupView extends VerticalLayout {
 
         Image qr = new Image(TotpQrCode.asDataUri(TotpUri.build(user.getUsername(), secret)),
                 "Two-factor enrolment QR code");
-        qr.setWidth("220px");
-        qr.setHeight("220px");
+        // 260px rather than something smaller: the enrolment URI carries the
+        // issuer twice plus the algorithm parameters, which pushes the symbol
+        // to around 57 modules a side. Below roughly 250px that is under five
+        // screen pixels per module, which phone cameras photographing a
+        // display can struggle with.
+        qr.setWidth("260px");
+        qr.setHeight("260px");
         card.add(qr);
 
         card.add(manualEntry(secret));

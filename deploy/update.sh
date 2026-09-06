@@ -1,24 +1,30 @@
 #!/usr/bin/env bash
 #
-# Update an existing CalendarSync install, native or Docker.
+# Build and install an update to a running CalendarSync, native or Docker.
 #
-# The installer (install-ubuntu.sh) doubles as an upgrade in that it replaces
-# the jar and restarts - but it does so under a running service, keeps no copy
-# of what it replaced, and never checks that the app came back. That was
-# survivable while an upgrade was only new code. It stopped being survivable
-# once upgrades started carrying Flyway migrations: migrations are forward-only
-# and are validated at startup, so once a new schema version has been applied
-# there is no way back to the previous jar without the database that matches
-# it.
+#   ./deploy/update.sh                  # build, then update whatever is installed
+#   ./deploy/update.sh --skip-tests     # build without running the test suite
+#   ./deploy/update.sh --no-build       # use the newest jar already in target/
+#   ./deploy/update.sh --jar /tmp/x.jar # use a jar built elsewhere
+#   ./deploy/update.sh --mode docker
+#   ./deploy/update.sh --dry-run
 #
-# So this script's real job is the two things the installer does not do: take a
-# copy of the database while the service is STOPPED, and put both the jar and
-# that copy back if the new version does not come up.
+# Run it as YOURSELF, not with sudo. It builds as you - so target/ and ~/.m2
+# stay yours - and asks for your password once, after the build, for the parts
+# that genuinely need root. Running the Maven build as root leaves root-owned
+# artifacts that break your next ordinary build.
 #
-#   sudo ./deploy/update.sh                    # auto-detect, newest jar in target/
-#   sudo ./deploy/update.sh --jar /tmp/new.jar
-#   sudo ./deploy/update.sh --mode docker
-#   sudo ./deploy/update.sh --dry-run
+# The installer (install-ubuntu.sh) also replaces a jar and restarts, but it
+# does so under a running service, keeps no copy of what it replaced, and never
+# checks that the app came back. That was survivable while an upgrade was only
+# new code. It stopped being survivable once upgrades started carrying Flyway
+# migrations: migrations are forward-only and are validated at startup, so once
+# a new schema version has been applied there is no way back to the previous jar
+# without the database that matches it.
+#
+# So this script's real job is the three things the installer does not do: build
+# from a known state, copy the database while the service is STOPPED, and put
+# both the jar and that copy back if the new version does not come up.
 #
 set -euo pipefail
 
@@ -41,23 +47,61 @@ MODE=""
 JAR=""
 FORCE=0
 DRY_RUN=0
+BUILD=1
+SKIP_TESTS=0
 COMPOSE_DIR=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --mode)    MODE="${2:-}"; shift 2 ;;
-        --jar)     JAR="${2:-}"; shift 2 ;;
-        --dir)     COMPOSE_DIR="${2:-}"; shift 2 ;;
-        --force)   FORCE=1; shift ;;
-        --dry-run) DRY_RUN=1; shift ;;
-        -h|--help) awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; exit 0 ;;
-        *)         die "unknown option: $1 (try --help)" ;;
+        --mode)       MODE="${2:-}"; shift 2 ;;
+        --jar)        JAR="${2:-}"; BUILD=0; shift 2 ;;
+        --dir)        COMPOSE_DIR="${2:-}"; shift 2 ;;
+        --no-build)   BUILD=0; shift ;;
+        --skip-tests) SKIP_TESTS=1; shift ;;
+        --force)      FORCE=1; shift ;;
+        --dry-run)    DRY_RUN=1; shift ;;
+        -h|--help)    awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; exit 0 ;;
+        *)            die "unknown option: $1 (try --help)" ;;
     esac
 done
 
-[ "$(id -u)" -eq 0 ] || die "must run as root: sudo $0 $*"
+# --- Privileges, acquired only when they are actually needed --------------
+
+SUDO=""
+ROOT_READY=0
+
+# Everything that needs root goes through this. Before the first call,
+# require_root() has already prompted, so a password prompt can never appear
+# half way through a rollback.
+as_root() {
+    if [ "$ROOT_READY" -eq 0 ]; then
+        require_root
+    fi
+    if [ -z "$SUDO" ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+require_root() {
+    [ "$ROOT_READY" -eq 1 ] && return 0
+    if [ "$(id -u)" -eq 0 ]; then
+        SUDO=""
+    else
+        command -v sudo >/dev/null 2>&1 \
+            || die "this needs root and sudo is not installed - re-run as root"
+        SUDO="sudo"
+        if ! sudo -n true 2>/dev/null; then
+            note "the rest of this needs root - you may be asked for your password"
+        fi
+        sudo -v || die "could not get root privileges"
+    fi
+    ROOT_READY=1
+}
 
 # --- Which kind of install is this? --------------------------------------
+# Both probes read world-readable paths, so detection never needs root.
 
 detect_mode() {
     local native=0 docker=0
@@ -70,7 +114,7 @@ detect_mode() {
     fi
     if [ "$docker" -eq 0 ] && [ -f "$REPO_DIR/docker-compose.yml" ] \
        && command -v docker >/dev/null 2>&1 \
-       && docker compose -f "$REPO_DIR/docker-compose.yml" ps --quiet 2>/dev/null | grep -q .; then
+       && $DOCKER compose -f "$REPO_DIR/docker-compose.yml" ps --quiet 2>/dev/null | grep -q .; then
         docker=1
     fi
 
@@ -87,6 +131,27 @@ detect_mode() {
        --mode native or --mode docker (with --dir for a Compose project)"
 }
 
+# Docker may or may not need root depending on whether this user is in the
+# docker group. Asking is better than assuming either way.
+DOCKER="docker"
+init_docker_command() {
+    command -v docker >/dev/null 2>&1 || die "docker is not installed"
+    if docker info >/dev/null 2>&1; then
+        DOCKER="docker"
+    else
+        require_root
+        DOCKER="${SUDO:+sudo }docker"
+        $DOCKER info >/dev/null 2>&1 \
+            || die "cannot talk to the Docker daemon, even as root. Is it running?"
+        note "using sudo for docker (this user is not in the docker group)"
+    fi
+}
+
+if command -v docker >/dev/null 2>&1 && ! docker info >/dev/null 2>&1; then
+    # Detection must not trip over a permission error and conclude "no stack".
+    DOCKER="true"
+fi
+
 if [ -z "$MODE" ]; then
     MODE="$(detect_mode)"
     note "detected a $MODE install"
@@ -97,17 +162,60 @@ else
     esac
 fi
 
-# --- Shared helpers -------------------------------------------------------
+# --- Build ----------------------------------------------------------------
 
-# Reads a KEY=value out of the systemd environment file. Not sourced: systemd
-# parses that file as plain KEY=value, NOT as shell, so sourcing it would
-# execute anything a value happened to look like.
-env_value() {
-    local key="$1" default="${2:-}" value
-    [ -f "$ENV_FILE" ] || { echo "$default"; return; }
-    value="$(grep -E "^${key}=" "$ENV_FILE" | tail -1 | cut -d= -f2- || true)"
-    value="${value%\"}"; value="${value#\"}"
-    [ -n "$value" ] && echo "$value" || echo "$default"
+# Deliberately NOT run through sudo. A root-owned target/ and ~/.m2 break the
+# next ordinary build, and the resulting permission errors are a long way from
+# their cause. If the script was started with sudo we hand the build back to
+# the invoking user; a genuine root login gets a warning instead, because there
+# is no unprivileged user to hand it to.
+build_jar() {
+    command -v mvn >/dev/null 2>&1 \
+        || die "mvn is not on PATH. Install Maven, or build elsewhere and pass --jar"
+
+    local -a maven=(mvn -B -Pprod package)
+    [ "$SKIP_TESTS" -eq 1 ] && maven+=(-DskipTests)
+
+    if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+        note "building as $SUDO_USER (not root, so target/ and ~/.m2 stay theirs)"
+        maven=(sudo -u "$SUDO_USER" -H "${maven[@]}")
+    elif [ "$(id -u)" -eq 0 ]; then
+        warn "building as root - target/ and ~/.m2 artifacts will be root-owned"
+    fi
+
+    if [ "$SKIP_TESTS" -eq 1 ]; then
+        note "building (tests skipped)"
+    else
+        note "building and running the tests"
+    fi
+    local log
+    log="$(mktemp)"
+    if ! (cd "$REPO_DIR" && "${maven[@]}") 2>&1 | tee "$log"; then
+        rm -f "$log"
+        die "the build failed - nothing has been changed"
+    fi
+
+    # NOTES.md records that vaadin-maven-plugin silently substitutes its own
+    # Node when the one on PATH is outside the range it supports - which is a
+    # floor AND a ceiling, so a too-NEW Node triggers it as readily as an old
+    # one. Worth surfacing: the first time it happens it fetches a Node
+    # distribution over the network in the middle of a build.
+    if grep -q 'nodejs.org/dist' "$log"; then
+        warn "Vaadin downloaded its own Node during this build - the Node on PATH is
+         outside the range it supports, so the pinned version was ignored."
+    elif grep -qi 'Using Node.js from' "$log"; then
+        warn "Vaadin used its own cached Node rather than the one on PATH
+         ($(node --version 2>/dev/null || echo 'unknown') is outside the range it supports)."
+    fi
+    rm -f "$log"
+
+    JAR="$(newest_jar)"
+    [ -n "$JAR" ] || die "the build reported success but produced no jar in $REPO_DIR/target"
+    note "built $(basename "$JAR")"
+}
+
+newest_jar() {
+    ls -t "$REPO_DIR"/target/calendarsync-*.jar 2>/dev/null | grep -v -- '-sources' | head -1 || true
 }
 
 # The jar must be a -Pprod build. Identical check to install-ubuntu.sh, and the
@@ -141,6 +249,18 @@ PY
     esac
 }
 
+# Reads a KEY=value out of the systemd environment file. Not sourced: systemd
+# parses that file as plain KEY=value, NOT as shell, so sourcing it would
+# execute anything a value happened to look like. Needs root - the file is 0600
+# because it holds the database key.
+env_value() {
+    local key="$1" default="${2:-}" value
+    as_root test -f "$ENV_FILE" || { echo "$default"; return; }
+    value="$(as_root grep -E "^${key}=" "$ENV_FILE" | tail -1 | cut -d= -f2- || true)"
+    value="${value%\"}"; value="${value#\"}"
+    [ -n "$value" ] && echo "$value" || echo "$default"
+}
+
 # systemctl reports the unit active the moment the JVM execs (Type=exec), which
 # is long before Flyway has migrated and Tomcat is listening - and a migration
 # failure exits AFTER that point. So health is measured by asking the app for a
@@ -163,12 +283,8 @@ wait_for_health() {
 
 prune_backups() {
     local root="$1"
-    [ -d "$root" ] || return 0
-    # shellcheck disable=SC2012
-    ls -1dt "$root"/* 2>/dev/null | tail -n +$((KEEP_BACKUPS + 1)) | while read -r old; do
-        note "removing old backup $(basename "$old")"
-        rm -rf "$old"
-    done
+    as_root test -d "$root" || return 0
+    as_root sh -c "ls -1dt '$root'/* 2>/dev/null | tail -n +$((KEEP_BACKUPS + 1)) | xargs -r rm -rf"
 }
 
 # =========================================================================
@@ -180,11 +296,30 @@ update_native() {
     [ -f "$UNIT_FILE" ] || die "no $UNIT_FILE - install it first with deploy/install-ubuntu.sh"
     command -v curl >/dev/null 2>&1 || die "curl is required for the post-update health check"
 
-    if [ -z "$JAR" ]; then
-        JAR="$(ls -t "$REPO_DIR"/target/calendarsync-*.jar 2>/dev/null | grep -v -- '-sources' | head -1 || true)"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        cat <<EOF
+
+Dry run - nothing will be changed.
+
+  build     $([ "$BUILD" -eq 1 ] && echo "mvn -B -Pprod package$([ "$SKIP_TESTS" -eq 1 ] && echo ' -DskipTests')" || echo "skipped")
+  install   ${JAR:-$(newest_jar)}
+            -> $APP_DIR/calendarsync.jar
+  backup    $BACKUP_ROOT/<timestamp>/  (database + current jar)
+  health    http://<SERVER_ADDRESS>:8080/login
+  root      needed for: reading $ENV_FILE, systemctl, the backup and the install
+EOF
+        exit 0
+    fi
+
+    # Build BEFORE asking for root: the build is the slow part, and a sudo
+    # timestamp acquired first could expire in the middle of it.
+    if [ "$BUILD" -eq 1 ]; then
+        build_jar
+    else
+        [ -n "$JAR" ] || JAR="$(newest_jar)"
     fi
     [ -n "$JAR" ] && [ -f "$JAR" ] \
-        || die "no jar found. Build one first: mvn -Pprod package, or pass --jar <path>"
+        || die "no jar found. Build one (drop --no-build), or pass --jar <path>"
 
     verify_prod_jar "$JAR"
 
@@ -192,9 +327,11 @@ update_native() {
     new_sum="$(sha256sum "$JAR" | cut -d' ' -f1)"
     old_sum="$(sha256sum "$APP_DIR/calendarsync.jar" | cut -d' ' -f1)"
     if [ "$new_sum" = "$old_sum" ] && [ "$FORCE" -eq 0 ]; then
-        note "the installed jar is already byte-identical to $JAR - nothing to do (use --force to reinstall anyway)"
+        note "the installed jar is already byte-identical to $(basename "$JAR") - nothing to do (use --force to reinstall anyway)"
         exit 0
     fi
+
+    require_root
 
     local db_path server_address health_url
     db_path="$(env_value CALENDARSYNC_DB_PATH "$DATA_DIR/calendarsync.db")"
@@ -208,40 +345,27 @@ update_native() {
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     backup_dir="$BACKUP_ROOT/$stamp"
 
-    if [ "$DRY_RUN" -eq 1 ]; then
-        cat <<EOF
-
-Dry run - nothing has been changed.
-
-  install   $JAR
-            -> $APP_DIR/calendarsync.jar
-  database  $db_path
-  backup    $backup_dir
-  health    $health_url
-EOF
-        exit 0
-    fi
-
     note "stopping calendarsync"
-    systemctl stop calendarsync.service || true
+    as_root systemctl stop calendarsync.service || true
     # Genuinely stopped before copying: a SQLite file copied out from under a
     # running writer can be torn, and a torn backup is worse than none because
     # it is only discovered when it is needed.
     local deadline=$((SECONDS + 60))
-    while systemctl is-active --quiet calendarsync.service; do
+    while as_root systemctl is-active --quiet calendarsync.service; do
         [ $SECONDS -lt $deadline ] || die "calendarsync did not stop within 60s - not touching anything"
         sleep 1
     done
 
     note "backing up to $backup_dir"
-    install -d -o root -g root -m 0700 "$BACKUP_ROOT" "$backup_dir"
+    as_root install -d -o root -g root -m 0700 "$BACKUP_ROOT"
+    as_root install -d -o root -g root -m 0700 "$backup_dir"
 
-    if [ -f "$db_path" ]; then
+    if as_root test -f "$db_path"; then
         # Free space first: a backup that runs out of disk half way through is
         # the worst of both worlds.
         local need avail
-        need="$(du -k "$db_path" | cut -f1)"
-        avail="$(df -Pk "$backup_dir" | awk 'NR==2 {print $4}')"
+        need="$(as_root du -k "$db_path" | cut -f1)"
+        avail="$(as_root df -Pk "$backup_dir" | awk 'NR==2 {print $4}')"
         [ "$avail" -gt $((need * 2)) ] \
             || die "not enough free space for a database backup (need ~$((need * 2))K, have ${avail}K)"
 
@@ -250,37 +374,37 @@ EOF
         # key - and the key must not be put on a command line. The -wal and -shm
         # siblings are copied when present; a clean shutdown checkpoints them,
         # but copying them costs nothing and an unclean one would need them.
-        cp -p "$db_path" "$backup_dir/"
+        as_root cp -p "$db_path" "$backup_dir/"
         for sidecar in "$db_path-wal" "$db_path-shm"; do
-            [ -f "$sidecar" ] && cp -p "$sidecar" "$backup_dir/"
+            as_root test -f "$sidecar" && as_root cp -p "$sidecar" "$backup_dir/"
         done
-        note "database backed up ($(du -h "$db_path" | cut -f1))"
+        note "database backed up ($(as_root du -h "$db_path" | cut -f1))"
     else
         warn "no database at $db_path - continuing (first start after an install?)"
     fi
 
-    cp -p "$APP_DIR/calendarsync.jar" "$backup_dir/calendarsync.jar"
-    echo "$old_sum  calendarsync.jar" > "$backup_dir/SHA256SUMS"
-    echo "$db_path" > "$backup_dir/db-path"
+    as_root cp -p "$APP_DIR/calendarsync.jar" "$backup_dir/calendarsync.jar"
+    as_root sh -c "printf '%s  calendarsync.jar\n' '$old_sum' > '$backup_dir/SHA256SUMS'"
+    as_root sh -c "printf '%s\n' '$db_path' > '$backup_dir/db-path'"
 
     note "installing $(basename "$JAR")"
-    install -o root -g root -m 0644 "$JAR" "$APP_DIR/calendarsync.jar"
+    as_root install -o root -g root -m 0644 "$JAR" "$APP_DIR/calendarsync.jar"
 
     note "starting calendarsync"
-    systemctl start calendarsync.service || true
+    as_root systemctl start calendarsync.service || true
 
     if wait_for_health "$health_url"; then
         prune_backups "$BACKUP_ROOT"
         note "update complete. Backup kept at $backup_dir"
         note "that backup contains your database - it is as sensitive as the live one"
-        systemctl --no-pager --lines=0 status calendarsync.service || true
+        as_root systemctl --no-pager --lines=0 status calendarsync.service || true
         exit 0
     fi
 
     echo >&2
     warn "the new version did not come up - rolling back"
     echo "--- last 50 log lines ---" >&2
-    journalctl -u calendarsync.service -n 50 --no-pager >&2 || true
+    as_root journalctl -u calendarsync.service -n 50 --no-pager >&2 || true
     echo "-------------------------" >&2
 
     rollback_native "$backup_dir" "$db_path" "$health_url"
@@ -297,35 +421,35 @@ EOF
 rollback_native() {
     local backup_dir="$1" db_path="$2" health_url="$3"
 
-    systemctl stop calendarsync.service || true
+    as_root systemctl stop calendarsync.service || true
     sleep 2
 
-    install -o root -g root -m 0644 "$backup_dir/calendarsync.jar" "$APP_DIR/calendarsync.jar"
+    as_root install -o root -g root -m 0644 "$backup_dir/calendarsync.jar" "$APP_DIR/calendarsync.jar"
     note "restored the previous jar"
 
     local db_name
     db_name="$(basename "$db_path")"
-    if [ -f "$backup_dir/$db_name" ]; then
-        cp -p "$backup_dir/$db_name" "$db_path"
+    if as_root test -f "$backup_dir/$db_name"; then
+        as_root cp -p "$backup_dir/$db_name" "$db_path"
         for suffix in -wal -shm; do
-            if [ -f "$backup_dir/${db_name}${suffix}" ]; then
-                cp -p "$backup_dir/${db_name}${suffix}" "${db_path}${suffix}"
+            if as_root test -f "$backup_dir/${db_name}${suffix}"; then
+                as_root cp -p "$backup_dir/${db_name}${suffix}" "${db_path}${suffix}"
             else
-                rm -f "${db_path}${suffix}"
+                as_root rm -f "${db_path}${suffix}"
             fi
         done
-        chown "$APP_USER:$APP_USER" "$db_path" "${db_path}-wal" "${db_path}-shm" 2>/dev/null || true
+        as_root chown "$APP_USER:$APP_USER" "$db_path" || true
         note "restored the database as it was before the update"
     fi
 
-    systemctl start calendarsync.service || true
+    as_root systemctl start calendarsync.service || true
     if wait_for_health "$health_url"; then
         die "the update failed and was rolled back. The previous version is running again.
-       The jar you tried is untouched; the logs above say why it would not start."
+       The jar you built is untouched; the logs above say why it would not start."
     fi
     die "the update failed AND the rollback did not come up. Backup is at $backup_dir
        (jar, database, and the path it came from). Investigate before starting again:
-         journalctl -u calendarsync -n 200"
+         sudo journalctl -u calendarsync -n 200"
 }
 
 # =========================================================================
@@ -333,7 +457,7 @@ rollback_native() {
 # =========================================================================
 
 update_docker() {
-    command -v docker >/dev/null 2>&1 || die "docker is not installed"
+    init_docker_command
     command -v curl >/dev/null 2>&1 || die "curl is required for the post-update health check"
 
     local dir="${COMPOSE_DIR:-$REPO_DIR}"
@@ -341,15 +465,15 @@ update_docker() {
     note "using the Compose project in $dir"
 
     local service=calendarsync container image volume
-    container="$(docker compose -f "$dir/docker-compose.yml" ps -q "$service" 2>/dev/null | head -1 || true)"
+    container="$($DOCKER compose -f "$dir/docker-compose.yml" ps -q "$service" 2>/dev/null | head -1 || true)"
     [ -n "$container" ] || die "the $service container is not running in $dir - start it first with: docker compose up -d"
 
-    image="$(docker inspect --format '{{.Image}}' "$container")"
-    volume="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' "$container")"
+    image="$($DOCKER inspect --format '{{.Image}}' "$container")"
+    volume="$($DOCKER inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' "$container")"
     [ -n "$volume" ] || die "could not find the /data volume for $service - refusing to update without a backup"
 
     local port_spec health_url
-    port_spec="$(docker compose -f "$dir/docker-compose.yml" port "$service" 8080 2>/dev/null || true)"
+    port_spec="$($DOCKER compose -f "$dir/docker-compose.yml" port "$service" 8080 2>/dev/null || true)"
     if [ -n "$port_spec" ]; then
         local host="${port_spec%:*}" hostport="${port_spec##*:}"
         case "$host" in ""|"0.0.0.0"|"::"|"[::]") host=127.0.0.1 ;; esac
@@ -365,22 +489,25 @@ update_docker() {
     if [ "$DRY_RUN" -eq 1 ]; then
         cat <<EOF
 
-Dry run - nothing has been changed.
+Dry run - nothing will be changed.
 
   project   $dir
-  image     $image  (tagged as the rollback point)
+  image     $image  (would be tagged as the rollback point)
   volume    $volume
   backup    $backup_dir/data.tgz
   health    $health_url
+
+  The image is rebuilt from this working tree by Compose, so --skip-tests and
+  --no-build do not apply here - the Dockerfile's own build stage runs.
 EOF
         exit 0
     fi
 
     note "tagging the current image as the rollback point"
-    docker tag "$image" "calendarsync:rollback-$stamp"
+    $DOCKER tag "$image" "calendarsync:rollback-$stamp"
 
     note "stopping the stack"
-    docker compose -f "$dir/docker-compose.yml" stop
+    $DOCKER compose -f "$dir/docker-compose.yml" stop
 
     note "backing up the $volume volume to $backup_dir"
     mkdir -p "$backup_dir"
@@ -388,7 +515,7 @@ EOF
     # tar runs inside the app's OWN image rather than pulling alpine: it is
     # known to be present (it is what is being replaced), which keeps this
     # working on a host with no network, and avoids trusting a second image.
-    docker run --rm \
+    $DOCKER run --rm \
         -v "$volume":/data:ro \
         -v "$backup_dir":/backup \
         --entrypoint tar "$image" -czf /backup/data.tgz -C /data . \
@@ -396,17 +523,16 @@ EOF
     note "volume backed up ($(du -h "$backup_dir/data.tgz" | cut -f1))"
 
     note "building the new image"
-    if ! docker compose -f "$dir/docker-compose.yml" build --pull; then
+    if ! $DOCKER compose -f "$dir/docker-compose.yml" build --pull; then
         warn "build failed - bringing the previous version back up"
-        docker compose -f "$dir/docker-compose.yml" up -d
+        $DOCKER compose -f "$dir/docker-compose.yml" up -d
         die "the image would not build. Nothing was replaced; the previous version is running."
     fi
 
     note "starting the new version"
-    docker compose -f "$dir/docker-compose.yml" up -d --remove-orphans
+    $DOCKER compose -f "$dir/docker-compose.yml" up -d --remove-orphans
 
     if wait_for_health "$health_url"; then
-        prune_backups "$dir/backups"
         note "update complete. Backup kept at $backup_dir/data.tgz"
         note "rollback image kept as calendarsync:rollback-$stamp"
         exit 0
@@ -414,21 +540,21 @@ EOF
 
     echo >&2
     warn "the new version did not come up - rolling back"
-    docker compose -f "$dir/docker-compose.yml" logs --tail 50 "$service" >&2 || true
+    $DOCKER compose -f "$dir/docker-compose.yml" logs --tail 50 "$service" >&2 || true
 
-    docker compose -f "$dir/docker-compose.yml" stop
+    $DOCKER compose -f "$dir/docker-compose.yml" stop
     note "restoring the volume"
     # Emptied first: untarring over a newer layout leaves both, and a database
     # migrated forward would still be sitting there.
-    docker run --rm -v "$volume":/data --entrypoint sh "calendarsync:rollback-$stamp" \
+    $DOCKER run --rm -v "$volume":/data --entrypoint sh "calendarsync:rollback-$stamp" \
         -c 'rm -rf /data/* /data/.[!.]* 2>/dev/null; true'
-    docker run --rm -v "$volume":/data -v "$backup_dir":/backup \
+    $DOCKER run --rm -v "$volume":/data -v "$backup_dir":/backup \
         --entrypoint tar "calendarsync:rollback-$stamp" -xzf /backup/data.tgz -C /data \
         || die "could not restore the volume. The backup is at $backup_dir/data.tgz"
 
     note "re-tagging the previous image"
-    docker tag "calendarsync:rollback-$stamp" "$image"
-    docker compose -f "$dir/docker-compose.yml" up -d
+    $DOCKER tag "calendarsync:rollback-$stamp" "$image"
+    $DOCKER compose -f "$dir/docker-compose.yml" up -d
 
     if wait_for_health "$health_url"; then
         die "the update failed and was rolled back. The previous version is running again."

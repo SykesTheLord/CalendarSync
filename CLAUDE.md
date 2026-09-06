@@ -71,7 +71,9 @@ JUnit 5 + AssertJ. No Testcontainers, no integration/unit split — `mvn test` r
 
 ## Updating an install
 
-`deploy/update.sh` (native or Docker, auto-detected). The installer replaces a jar under a running service with no backup; the updater stops the service, copies the database, and **rolls the jar and the database back together** on failure — Flyway is forward-only and validates at startup, so an old jar against a migrated database refuses to start. Health is `GET /login` returning 200, not `systemctl is-active`: `Type=exec` reports active before Flyway has run.
+`./deploy/update.sh` (native or Docker, auto-detected). **Run without `sudo`** — it builds as the invoking user, then calls `require_root` only for the privileged steps, and does the build *before* asking so a password prompt can't land mid-rollback. Every privileged call goes through the `as_root` wrapper.
+
+It builds with `mvn -Pprod package` (tests included; `--skip-tests` to skip — the suite does pass under `-Pprod`, contrary to what the profile-pairing note might imply, because `-Pprod` builds a frontend bundle at `compile`). On failure it **rolls the jar and the database back together** — Flyway is forward-only and validates at startup, so an old jar against a migrated database refuses to start. Health is `GET /login` returning 200, not `systemctl is-active`: `Type=exec` reports active before Flyway has run.
 
 ## Docker build
 

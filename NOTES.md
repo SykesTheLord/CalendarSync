@@ -396,6 +396,25 @@ needed" and compiles the real thing.
 **Node is pinned to 24, not 22, and that version floor matters.**
 `vaadin-maven-plugin` has a minimum Node version and silently downloads its own
 distribution from nodejs.org into `~/.vaadin` when the one on `PATH` is older.
+
+**The Node range has a ceiling as well as a floor, which the note above did not
+say.** Observed while adding `deploy/update.sh`, on a dev host carrying Node
+26.2.0: `mvn -Pprod package` logged
+
+    The globally installed Node.js version 26.x is newer than the maximum
+    supported version 24.x and may not be compatible. Using Node.js from
+    /home/jacob/.vaadin.
+
+and built against its own cached `node-v24.15.0` instead. So the substitution
+this project already guards against is triggered by a *too new* Node exactly as
+readily as an old one, and on a machine with no cache the ceiling case
+downloads over the network mid-build just as the floor case does. The
+`Downloading https://nodejs.org/dist/...` line named above is therefore only
+half the symptom; `Using Node.js from ...` is the other half, and it is the one
+that appears once the download has already happened. `update.sh` greps the
+build output for both.
+
+
 Pinning the system Node to 22 therefore achieved nothing: Vaadin ignored it and
 fetched v24.15.0 over the network mid-build, which is the same unpinned-download
 problem the pin was meant to remove, just relocated. The image now copies Node
@@ -1002,6 +1021,39 @@ about the code agreeing with itself.
 `deploy/update.sh` covers both deployment shapes, auto-detecting which is
 present and refusing to guess when both or neither are.
 
+**It builds the jar itself, and it is run without `sudo`.** Those two are the
+same decision. The privileged work is a handful of quick operations - read the
+0600 environment file, stop the unit, copy, install, start - while the build is
+the long, entirely unprivileged part. Running the whole script as root would
+run Maven as root too, leaving a root-owned `target/` and `~/.m2` that break the
+operator's next ordinary build, with permission errors a long way from their
+cause. So the script runs as the invoking user and calls `require_root` only
+when it first needs it.
+
+The ordering matters more than it looks: **the build happens before root is
+requested at all.** Asking first would mean the sudo timestamp is acquired and
+then left to idle through a multi-minute Maven run, and a password prompt
+appearing part-way through - potentially in the middle of a rollback - is
+exactly what the up-front prompt is meant to avoid. Every privileged call goes
+through one `as_root` wrapper, which primes the credential on first use, so
+after that point nothing can block on a prompt.
+
+Two smaller consequences. `sudo ./deploy/update.sh` still works rather than
+being refused, because people will type it out of habit and the old
+documentation told them to - if `SUDO_USER` is set the build is handed back to
+that account, and only a genuine root login (no `SUDO_USER`) gets a warning
+that its build artifacts will be root-owned. And the Docker path asks the
+daemon whether it needs `sudo` at all (`docker info` as the current user)
+rather than assuming either way, since a user in the `docker` group needs none.
+
+**Tests run as part of the build by default.** `mvn -Pprod package` under the
+prod Maven profile was verified to pass all 150 tests, which is not obvious -
+CLAUDE.md warns that dropping the Maven `dev` profile removes `vaadin-dev` and
+breaks any test that requests a view. It does not here, because `-Pprod` builds
+a production frontend bundle at `compile`, so the views render from that
+instead. `--skip-tests` exists for an urgent deploy, but a green suite before
+replacing a running jar is worth the extra half minute.
+
 **It exists because upgrades now carry migrations.** `install-ubuntu.sh` has
 always doubled as an upgrade, but it replaces the jar under a running service,
 keeps no copy of what it replaced, and never checks that the app came back.
@@ -1052,6 +1104,25 @@ The environment file is parsed with `grep`, not sourced: systemd reads it as
 plain `KEY=value`, so sourcing it as shell would execute whatever a value
 happened to look like. Verified against base64 keys containing `/`, `+` and
 `=`, quoted values, and missing keys falling back to defaults.
+
+**Verified end to end against a sandboxed install, not only by reading it.** A
+harness with a fake `systemctl` driving a real HTTP server, fake `-Pprod` and
+`-Pdev` jars built to satisfy the `org/sqlite/mc/` probe, and a fake app that
+appends a "migration" line to the database on every start:
+
+| Case | Result |
+|---|---|
+| a `-Pdev` jar | refused, with the plaintext-database explanation |
+| `--dry-run` | reports the plan, changes nothing |
+| a good jar | backup written (database + old jar), jar swapped, health check passes |
+| a jar that migrates and then fails to start | both jar **and** database restored, previous version healthy again |
+| the same run with the database restore deleted | the forward migration survives - so the test above genuinely discriminates |
+| a jar byte-identical to the installed one | exits early rather than taking an outage |
+| a deliberately broken Maven invocation | "the build failed - nothing has been changed"; installed jar untouched, app still serving |
+
+The fifth row is the one worth keeping. A rollback test that passes whether or
+not the rollback happened proves nothing, so the control run removes the
+database restore and confirms the assertion flips.
 
 ## Version substitutions
 

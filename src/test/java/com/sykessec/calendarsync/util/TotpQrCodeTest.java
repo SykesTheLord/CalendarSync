@@ -17,30 +17,44 @@ class TotpQrCodeTest {
      * phone can scan. Round-tripping it through the reader is the only check
      * that actually stands behind the claim on the enrolment page.
      */
+    /**
+     * Fixed secrets, not Totp.generateSecret().
+     *
+     * The first version of this test generated a random secret per run, which
+     * made it fail roughly one run in two hundred - the reconstruction below
+     * feeds zxing a bitmap at a few pixels per module, and a small proportion
+     * of symbols do not survive that. The QR codes were fine; the harness was
+     * marginal. A test that fails occasionally for reasons unrelated to the
+     * code under test is worse than no test, so the inputs are pinned and the
+     * bitmap is scaled generously.
+     */
+    private static final String[] SECRETS = {
+        "MZXW6YTBOIMZXW6YTBOIMZXW6YTBOIMZ",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "7777777777777777777777777777777A",
+        "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
+    };
+
     @Test
     void producesAQrCodeThatDecodesBackToTheEnrolmentUri() throws Exception {
-        String uri = TotpUri.build("alice", Totp.generateSecret());
-
-        String svg = TotpQrCode.toSvg(uri);
-        BitMatrix matrix = parseSvgToMatrix(svg);
-
-        String decoded = new QRCodeReader()
-                .decode(new BinaryBitmap(new HybridBinarizer(new BitMatrixSource(matrix))))
-                .getText();
-
-        assertThat(decoded).isEqualTo(uri);
+        for (String secret : SECRETS) {
+            String uri = TotpUri.build("alice", secret);
+            assertThat(decode(TotpQrCode.toSvg(uri))).isEqualTo(uri);
+        }
     }
 
     @Test
     void survivesAUsernameThatNeedsEscaping() throws Exception {
-        String uri = TotpUri.build("ada lovelace", Totp.generateSecret());
+        for (String secret : SECRETS) {
+            String uri = TotpUri.build("ada lovelace", secret);
+            assertThat(decode(TotpQrCode.toSvg(uri))).isEqualTo(uri);
+        }
+    }
 
-        BitMatrix matrix = parseSvgToMatrix(TotpQrCode.toSvg(uri));
-        String decoded = new QRCodeReader()
-                .decode(new BinaryBitmap(new HybridBinarizer(new BitMatrixSource(matrix))))
+    private static String decode(String svg) throws Exception {
+        return new QRCodeReader()
+                .decode(new BinaryBitmap(new HybridBinarizer(new BitMatrixSource(parseSvgToMatrix(svg)))))
                 .getText();
-
-        assertThat(decoded).isEqualTo(uri);
     }
 
     @Test
@@ -68,9 +82,10 @@ class TotpQrCodeTest {
         int height = Integer.parseInt(box.group(2));
 
         // Scaled up on the way back in: zxing's detector cannot lock onto a
-        // symbol rendered at one pixel per module, which is exactly what the
-        // SVG viewBox uses. The browser scales it the same way.
-        int scale = 4;
+        // symbol rendered at one pixel per module, which is what the SVG
+        // viewBox uses, and is unreliable at three or four. The browser scales
+        // it the same way, only with a real renderer.
+        int scale = 8;
         BitMatrix matrix = new BitMatrix(width * scale, height * scale);
         java.util.regex.Matcher runs = java.util.regex.Pattern
                 .compile("M(\\d+) (\\d+)h(\\d+)v1").matcher(svg);
