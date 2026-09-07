@@ -21,7 +21,6 @@ import java.util.List;
 public class CalDavDiscoveryService {
 
     private static final URI ICLOUD_ENTRY = URI.create("https://caldav.icloud.com/");
-    private static final int MAX_REDIRECTS = 5;
 
     private final CalDavClient client;
 
@@ -44,17 +43,20 @@ public class CalDavDiscoveryService {
             throws ProviderException {
         URI entry = entryPointFor(connection);
 
-        PropfindResult principal = propfindFollowingRedirects(entry, 0,
+        // CalDavClient follows same-site redirects itself, so these are already
+        // the final hop - response.finalUri() is what an href must be resolved
+        // against, which is the whole reason it is carried back.
+        CalDavResponse principal = client.propfind(entry, 0,
                 CalDavXmlSupport.currentUserPrincipalRequest(), credentials);
-        requireSuccess(principal.response(), "current-user-principal");
-        String principalHref = CalDavXmlSupport.parseCurrentUserPrincipal(principal.response().body())
+        requireSuccess(principal, "current-user-principal");
+        String principalHref = CalDavXmlSupport.parseCurrentUserPrincipal(principal.body())
                 .orElseThrow(() -> new ProviderException("No current-user-principal in PROPFIND response"));
         URI principalUri = CalDavUris.resolveWithinSite(principal.finalUri(), principalHref);
 
-        PropfindResult homeSet = propfindFollowingRedirects(principalUri, 0,
+        CalDavResponse homeSet = client.propfind(principalUri, 0,
                 CalDavXmlSupport.calendarHomeSetRequest(), credentials);
-        requireSuccess(homeSet.response(), "calendar-home-set");
-        String homeSetHref = CalDavXmlSupport.parseCalendarHomeSet(homeSet.response().body())
+        requireSuccess(homeSet, "calendar-home-set");
+        String homeSetHref = CalDavXmlSupport.parseCalendarHomeSet(homeSet.body())
                 .orElseThrow(() -> new ProviderException("No calendar-home-set in PROPFIND response"));
 
         return CalDavUris.resolveWithinSite(homeSet.finalUri(), homeSetHref);
@@ -71,34 +73,14 @@ public class CalDavDiscoveryService {
         List<CalDavXmlSupport.DiscoveredCalendar> discovered = new java.util.ArrayList<>();
         for (CalDavXmlSupport.DiscoveredCalendar c : CalDavXmlSupport.parseCalendarCollections(response.body())) {
             discovered.add(new CalDavXmlSupport.DiscoveredCalendar(
-                    CalDavUris.resolveWithinSite(calendarHomeSetUri, c.href()).toString(), c.displayName()));
+                    CalDavUris.resolveWithinSite(response.finalUri(), c.href()).toString(), c.displayName()));
         }
         return discovered;
-    }
-
-    private PropfindResult propfindFollowingRedirects(URI uri, int depth, String body, CalDavCredentials credentials)
-            throws ProviderException {
-        URI current = uri;
-        for (int i = 0; i <= MAX_REDIRECTS; i++) {
-            CalDavResponse response = client.propfind(current, depth, body, credentials);
-            if (!response.isRedirect() || response.location() == null) {
-                return new PropfindResult(response, current);
-            }
-            // The next hop carries the user's CalDAV password, so it has to
-            // stay inside the site they pointed this connection at - a hostile
-            // or compromised server must not be able to redirect the credential
-            // to a host of its choosing.
-            current = CalDavUris.resolveWithinSite(current, response.location());
-        }
-        throw new ProviderException("Too many redirects discovering CalDAV endpoint at " + uri);
     }
 
     private void requireSuccess(CalDavResponse response, String what) throws ProviderException {
         if (!response.isSuccess()) {
             throw new ProviderException("PROPFIND for " + what + " failed: HTTP " + response.status());
         }
-    }
-
-    private record PropfindResult(CalDavResponse response, URI finalUri) {
     }
 }

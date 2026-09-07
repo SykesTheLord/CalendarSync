@@ -2,11 +2,10 @@ package com.sykessec.calendarsync.ui.login;
 
 import com.sykessec.calendarsync.security.PendingSecondFactor;
 import com.sykessec.calendarsync.security.SecondFactorAuthenticationFilter;
-import com.vaadin.flow.component.button.Button;
-import com.vaadin.flow.component.button.ButtonVariant;
 import com.vaadin.flow.component.html.Anchor;
 import com.vaadin.flow.component.html.H1;
 import com.vaadin.flow.component.html.Input;
+import com.vaadin.flow.component.html.NativeButton;
 import com.vaadin.flow.component.html.NativeDetails;
 import com.vaadin.flow.component.html.NativeLabel;
 import com.vaadin.flow.component.html.Paragraph;
@@ -82,7 +81,14 @@ public class TwoFactorVerifyView extends VerticalLayout implements BeforeEnterOb
                 .getParameters().containsKey("error")));
     }
 
-    private NativeForm buildForm(PendingSecondFactor pending, boolean showError) {
+    /**
+     * Package-private so TwoFactorVerifyViewTest can walk the form it returns.
+     * The one defect this page has had was invisible to every HTTP-level test -
+     * a Vaadin view is rendered client-side, so the markup never appears in a
+     * bootstrap response - and could only be caught by inspecting the component
+     * tree directly.
+     */
+    NativeForm buildForm(PendingSecondFactor pending, boolean showError) {
         NativeForm form = new NativeForm(SecondFactorAuthenticationFilter.PROCESSING_URL);
         form.addClassName("cs-verify-form");
 
@@ -110,9 +116,19 @@ public class TwoFactorVerifyView extends VerticalLayout implements BeforeEnterOb
         // wrong one, and password managers occasionally autofill into it.
         form.add(recoveryDetails());
 
-        Button submit = new Button("Verify");
-        submit.addThemeVariants(ButtonVariant.LUMO_PRIMARY);
+        // A native <button>, and for the same reason the fields are native
+        // inputs: only a form-associated element can submit a form. This was a
+        // Vaadin Button carrying type="submit", which is inert on a custom
+        // element - so the page had no submit path at all. Worse, it looked
+        // alive: Vaadin's Button registers a ClickEvent listener from its
+        // constructor (for disableOnClick), so a click became a UIDL round trip
+        // to a handler that does nothing, and the form was never posted. Enter
+        // did not rescue it either - implicit submission needs a real submit
+        // button once a form has more than one field that blocks it, and this
+        // one has both the code and the recovery code.
+        NativeButton submit = new NativeButton("Verify");
         submit.getElement().setAttribute("type", "submit");
+        submit.addClassName("cs-verify-submit");
         form.add(submit);
 
         Anchor cancel = new Anchor("/login", "Cancel and sign in again");

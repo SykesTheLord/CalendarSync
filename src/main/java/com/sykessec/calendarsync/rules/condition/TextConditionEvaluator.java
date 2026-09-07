@@ -7,6 +7,7 @@ import com.sykessec.calendarsync.provider.ProviderEvent;
 
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
@@ -88,9 +89,17 @@ public class TextConditionEvaluator implements ConditionEvaluator {
             return false;
         }
         return switch (comparison) {
+            // Locale.ROOT, not the JVM default. A default-locale toLowerCase()
+            // made this the one operator here whose behaviour depended on where
+            // the server happened to be configured: under a Turkish locale
+            // "MEETING".toLowerCase() is "meetIng" with a dotless i, so a
+            // CONTAINS rule for "meeting" silently stopped matching while the
+            // same rule written as STARTS_WITH or EQUALS - which use
+            // regionMatches and equalsIgnoreCase, both locale-independent -
+            // kept working.
             case CONTAINS -> caseSensitive
                     ? candidate.contains(value)
-                    : candidate.toLowerCase().contains(value.toLowerCase());
+                    : candidate.toLowerCase(Locale.ROOT).contains(value.toLowerCase(Locale.ROOT));
             // regionMatches with ignoreCase does the same job as startsWith
             // without allocating a lowercased copy of every candidate.
             case STARTS_WITH -> candidate.regionMatches(!caseSensitive, 0, value, 0, value.length());

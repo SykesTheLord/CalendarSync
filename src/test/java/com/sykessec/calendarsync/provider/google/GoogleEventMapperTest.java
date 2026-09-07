@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.TimeZone;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -88,5 +89,43 @@ class GoogleEventMapperTest {
         assertThat(restored.getSummary()).isEqualTo("Design Review");
         assertThat(restored.getId()).isNull();
         assertThat(restored.getEtag()).isNull();
+    }
+
+    /**
+     * Google signals all-day by populating date instead of dateTime - the two
+     * are mutually exclusive - and the resulting instant has to be midnight UTC
+     * of that date, because IcsCalendarMapper reads the date straight back out
+     * in UTC to write VALUE=DATE.
+     *
+     * The JVM zone is shifted here to pin that as an invariant rather than an
+     * accident of the machine the suite runs on. It holds today - a date-only
+     * google-http-client DateTime parses with a zone shift of 0 whatever the
+     * default zone is, which was verified rather than assumed - so this is not
+     * a regression test for a bug that existed, it is a guard on a property the
+     * exporter now depends on and a library upgrade could quietly change.
+     */
+    @Test
+    void marksAnAllDayEventAndPinsItToMidnightUtcRegardlessOfTheJvmZone() throws Exception {
+        TimeZone originalZone = TimeZone.getDefault();
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone("Asia/Tokyo"));
+
+            Event event = sampleEvent();
+            event.setStart(new EventDateTime().setDate(new DateTime("2026-07-01")));
+            event.setEnd(new EventDateTime().setDate(new DateTime("2026-07-02")));
+
+            ProviderEvent mapped = mapper.toProviderEvent(event, "Work");
+
+            assertThat(mapped.allDay()).isTrue();
+            assertThat(mapped.start()).isEqualTo(Instant.parse("2026-07-01T00:00:00Z"));
+            assertThat(mapped.end()).isEqualTo(Instant.parse("2026-07-02T00:00:00Z"));
+        } finally {
+            TimeZone.setDefault(originalZone);
+        }
+    }
+
+    @Test
+    void aTimedEventIsNotMarkedAllDay() throws Exception {
+        assertThat(mapper.toProviderEvent(sampleEvent(), "Work").allDay()).isFalse();
     }
 }

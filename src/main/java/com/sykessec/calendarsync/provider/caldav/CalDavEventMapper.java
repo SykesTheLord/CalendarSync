@@ -42,9 +42,10 @@ public class CalDavEventMapper {
                 .toList();
         Instant start = vevent.getStartDate().map(p -> toInstant(p.getDate())).orElse(null);
         Instant end = vevent.getEndDate().map(p -> toInstant(p.getDate())).orElse(null);
+        boolean allDay = vevent.getStartDate().map(p -> isDateOnly(p.getDate())).orElse(false);
         boolean recurring = vevent.getProperty(Property.RRULE).isPresent();
 
-        return new ProviderEvent(uid, title, description, location, attendees, start, end,
+        return new ProviderEvent(uid, title, description, location, attendees, start, end, allDay,
                 recurring, calendarName, SnapshotFormat.ICS, icsText);
     }
 
@@ -88,6 +89,16 @@ public class CalDavEventMapper {
             return null;
         }
         return value.regionMatches(true, 0, "mailto:", 0, 7) ? value.substring(7) : value;
+    }
+
+    /**
+     * ical4j hands back a LocalDate for DTSTART;VALUE=DATE and an
+     * OffsetDateTime/ZonedDateTime for everything with a time on it, so the
+     * parsed temporal's own type is the all-day signal - no need to re-read
+     * the VALUE parameter.
+     */
+    private static boolean isDateOnly(Temporal temporal) {
+        return temporal instanceof LocalDate;
     }
 
     private static Instant toInstant(Temporal temporal) {

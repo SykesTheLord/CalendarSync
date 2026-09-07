@@ -52,11 +52,86 @@ class IcsCalendarMapperTest {
         assertThat(events).allMatch(e -> e.rawFormat() == SnapshotFormat.ICS);
     }
 
+    private static final String ALL_DAY_FEED = """
+            BEGIN:VCALENDAR
+            VERSION:2.0
+            PRODID:-//Test//Test//EN
+            BEGIN:VEVENT
+            UID:holiday@example.com
+            DTSTAMP:20260101T000000Z
+            DTSTART;VALUE=DATE:20260115
+            DTEND;VALUE=DATE:20260116
+            SUMMARY:Public holiday
+            END:VEVENT
+            END:VCALENDAR
+            """;
+
+    @Test
+    void recognisesAnAllDayEventOnTheWayIn() throws Exception {
+        List<ProviderEvent> events = mapper.parseFeed(ALL_DAY_FEED, "Holidays");
+
+        assertThat(events).singleElement().satisfies(event -> {
+            assertThat(event.allDay()).isTrue();
+            // Normalized to midnight UTC of the date the source named, which is
+            // what makes toUtcDate() on the way out exact rather than lossy.
+            assertThat(event.start()).isEqualTo(Instant.parse("2026-01-15T00:00:00Z"));
+            assertThat(event.end()).isEqualTo(Instant.parse("2026-01-16T00:00:00Z"));
+        });
+    }
+
+    @Test
+    void timedEventsAreNotMistakenForAllDayOnes() throws Exception {
+        assertThat(mapper.parseFeed(FEED, "Team Calendar")).allMatch(event -> !event.allDay());
+    }
+
+    /**
+     * The regression this pair exists for. An all-day event carries a DATE, not
+     * an instant; exporting it as DTSTART:20260115T000000Z moved it to the
+     * previous evening for every subscriber west of UTC - the event landed on
+     * the wrong DAY, which is not something a calendar may get wrong. Asserting
+     * on the emitted property line rather than on a re-parsed model is
+     * deliberate: the wire format is what the subscriber's client acts on.
+     */
+    @Test
+    void anAllDayEventIsExportedAsADateNotAMidnightTimestamp() throws Exception {
+        String feedText = build(mapper.parseFeed(ALL_DAY_FEED, "Holidays").getFirst(), ExportProfile.DEFAULT);
+
+        assertThat(feedText).contains("DTSTART;VALUE=DATE:20260115");
+        assertThat(feedText).contains("DTEND;VALUE=DATE:20260116");
+        assertThat(feedText).doesNotContain("DTSTART:20260115T000000Z");
+    }
+
+    @Test
+    void aTimedEventIsStillExportedAsAUtcTimestamp() throws Exception {
+        String feedText = build(event(), ExportProfile.DEFAULT);
+
+        assertThat(feedText).contains("DTSTART:20260901T100000Z");
+        assertThat(feedText).doesNotContain("VALUE=DATE");
+    }
+
+    /**
+     * An all-day event survives a full export/re-import cycle unchanged. A feed
+     * this app publishes can itself be an ICS source for another instance, and
+     * a round trip that quietly drifts by a day each hop is worse than one that
+     * is wrong once.
+     */
+    @Test
+    void allDaySurvivesARoundTripThroughTheFeed() throws Exception {
+        ProviderEvent original = mapper.parseFeed(ALL_DAY_FEED, "Holidays").getFirst();
+        String published = build(original, ExportProfile.DEFAULT);
+
+        ProviderEvent reparsed = mapper.parseFeed(published, "Holidays").getFirst();
+
+        assertThat(reparsed.allDay()).isTrue();
+        assertThat(reparsed.start()).isEqualTo(original.start());
+        assertThat(reparsed.end()).isEqualTo(original.end());
+    }
+
     @Test
     void buildFeedProducesAParseableCalendarWithAllEvents() throws Exception {
         ProviderEvent event = new ProviderEvent("evt-x", "Quarterly Review", "desc", "Room 1",
                 List.of("alice@example.com"), Instant.parse("2026-09-01T10:00:00Z"),
-                Instant.parse("2026-09-01T11:00:00Z"), false, "Work", null, null);
+                Instant.parse("2026-09-01T11:00:00Z"), false, false, "Work", null, null);
 
         byte[] feedBytes = mapper.buildFeed(List.of(event), ExportProfile.DEFAULT);
         String feedText = new String(feedBytes, java.nio.charset.StandardCharsets.UTF_8);
@@ -85,7 +160,7 @@ class IcsCalendarMapperTest {
     @Test
     void buildFeedGeneratesUidWhenEventHasNone() throws Exception {
         ProviderEvent event = new ProviderEvent(null, "No UID Event", null, null, List.of(),
-                Instant.parse("2026-09-01T10:00:00Z"), null, false, "Work", null, null);
+                Instant.parse("2026-09-01T10:00:00Z"), null, false, false, "Work", null, null);
 
         byte[] feedBytes = mapper.buildFeed(List.of(event), ExportProfile.DEFAULT);
         String feedText = new String(feedBytes, java.nio.charset.StandardCharsets.UTF_8);
@@ -166,8 +241,8 @@ class IcsCalendarMapperTest {
         // Google and Microsoft Graph snapshots are JSON: there is no VALARM to
         // copy, and the export says so by producing none rather than failing.
         ProviderEvent jsonSourced = new ProviderEvent("evt-json", "Quarterly Review", null, null, List.of(),
-                Instant.parse("2026-09-01T10:00:00Z"), Instant.parse("2026-09-01T11:00:00Z"), false, "Work",
-                SnapshotFormat.GOOGLE_JSON, "{\"id\":\"evt-json\"}");
+                Instant.parse("2026-09-01T10:00:00Z"), Instant.parse("2026-09-01T11:00:00Z"), false, false,
+                "Work", SnapshotFormat.GOOGLE_JSON, "{\"id\":\"evt-json\"}");
 
         String feedText = build(jsonSourced, new ExportProfile(ExportTarget.UNIVERSAL, EventClassification.UNCHANGED,
                 EventBusyStatus.UNCHANGED, AlarmPolicy.PASSTHROUGH, 15));
@@ -179,8 +254,8 @@ class IcsCalendarMapperTest {
     void passthroughSurvivesAnUnparseableSnapshot() throws Exception {
         // One bad snapshot must cost the subscriber a reminder, not the feed.
         ProviderEvent broken = new ProviderEvent("evt-broken", "Quarterly Review", null, null, List.of(),
-                Instant.parse("2026-09-01T10:00:00Z"), Instant.parse("2026-09-01T11:00:00Z"), false, "Work",
-                SnapshotFormat.ICS, "this is not an ICS document");
+                Instant.parse("2026-09-01T10:00:00Z"), Instant.parse("2026-09-01T11:00:00Z"), false, false,
+                "Work", SnapshotFormat.ICS, "this is not an ICS document");
 
         String feedText = build(broken, new ExportProfile(ExportTarget.UNIVERSAL, EventClassification.UNCHANGED,
                 EventBusyStatus.UNCHANGED, AlarmPolicy.PASSTHROUGH, 15));
@@ -253,14 +328,14 @@ class IcsCalendarMapperTest {
 
     private ProviderEvent event() {
         return new ProviderEvent("evt-x", "Quarterly Review", null, null, List.of(),
-                Instant.parse("2026-09-01T10:00:00Z"), Instant.parse("2026-09-01T11:00:00Z"), false, "Work",
-                null, null);
+                Instant.parse("2026-09-01T10:00:00Z"), Instant.parse("2026-09-01T11:00:00Z"), false, false,
+                "Work", null, null);
     }
 
     private ProviderEvent eventWithIcsSnapshot(String snapshot) {
         return new ProviderEvent("evt-alarm@example.com", "Quarterly Review", null, null, List.of(),
-                Instant.parse("2026-09-01T10:00:00Z"), Instant.parse("2026-09-01T11:00:00Z"), false, "Work",
-                SnapshotFormat.ICS, snapshot);
+                Instant.parse("2026-09-01T10:00:00Z"), Instant.parse("2026-09-01T11:00:00Z"), false, false,
+                "Work", SnapshotFormat.ICS, snapshot);
     }
 
     private String build(ProviderEvent event, ExportProfile profile) throws Exception {

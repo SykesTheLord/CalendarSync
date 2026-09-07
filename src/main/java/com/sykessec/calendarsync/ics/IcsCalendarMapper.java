@@ -95,6 +95,10 @@ public class IcsCalendarMapper {
         List<String> attendees = vevent.getAttendees().stream().map(Property::getValue).toList();
         Instant start = vevent.getStartDate().map(p -> toInstant(p.getDate())).orElse(null);
         Instant end = vevent.getEndDate().map(p -> toInstant(p.getDate())).orElse(null);
+        // ical4j parses DTSTART;VALUE=DATE into a LocalDate and everything with
+        // a time into an OffsetDateTime/ZonedDateTime, so the temporal's type
+        // is the all-day signal.
+        boolean allDay = vevent.getStartDate().map(p -> p.getDate() instanceof LocalDate).orElse(false);
         boolean recurring = vevent.getProperty(Property.RRULE).isPresent();
 
         String snapshot;
@@ -110,8 +114,8 @@ public class IcsCalendarMapper {
             snapshot = null;
         }
 
-        return new ProviderEvent(uid, title, description, location, attendees, start, end, recurring,
-                calendarName, snapshot == null ? null : SnapshotFormat.ICS, snapshot);
+        return new ProviderEvent(uid, title, description, location, attendees, start, end, allDay,
+                recurring, calendarName, snapshot == null ? null : SnapshotFormat.ICS, snapshot);
     }
 
     /**
@@ -148,11 +152,16 @@ public class IcsCalendarMapper {
     private VEvent toVEvent(ProviderEvent event, ExportProfile profile) {
         VEvent vevent = new VEvent();
         vevent.add(new Uid(event.uid() == null ? java.util.UUID.randomUUID().toString() : event.uid()));
+        // An all-day event must go out as a DATE, not as the midnight instant
+        // it was normalized to. ical4j writes VALUE=DATE for a LocalDate and a
+        // UTC timestamp for an Instant, so the choice of temporal type here IS
+        // the choice of wire format - see ProviderEvent.allDay for why writing
+        // the instant put the event on the wrong day for half the world.
         if (event.start() != null) {
-            vevent.add(new DtStart<>(event.start()));
+            vevent.add(event.allDay() ? new DtStart<>(toUtcDate(event.start())) : new DtStart<>(event.start()));
         }
         if (event.end() != null) {
-            vevent.add(new DtEnd<>(event.end()));
+            vevent.add(event.allDay() ? new DtEnd<>(toUtcDate(event.end())) : new DtEnd<>(event.end()));
         }
         if (event.title() != null) {
             vevent.add(new Summary(event.title()));
@@ -270,6 +279,17 @@ public class IcsCalendarMapper {
         } catch (ValidationException e) {
             return false;
         }
+    }
+
+    /**
+     * The calendar date an all-day event's normalized instant stands for.
+     * Every producer of an all-day ProviderEvent sets the instant to midnight
+     * UTC of that date, so reading it back in UTC is exact rather than a
+     * best-effort conversion - and going through the system zone here would
+     * shift the date on any server not running on UTC.
+     */
+    private LocalDate toUtcDate(Instant instant) {
+        return instant.atZone(ZoneOffset.UTC).toLocalDate();
     }
 
     private Instant toInstant(Temporal temporal) {

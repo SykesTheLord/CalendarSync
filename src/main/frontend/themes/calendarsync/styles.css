@@ -89,6 +89,68 @@ html[theme~="dark"] .cs-card {
   margin: 0;
 }
 
+/* The two-factor verify page hand-rolls a real <form> (see NativeForm) because
+ * a Spring Security filter processes the POST. That means two things Lumo would
+ * otherwise have done for free have to be done here: the card's flex layout
+ * stops at the form element, and the native controls inside it - which have to
+ * be native, since only form-associated elements submit - get no component
+ * styling at all. */
+.cs-verify-form {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--lumo-space-m);
+}
+
+.cs-verify-form label {
+  font-size: var(--lumo-font-size-s);
+  font-weight: 500;
+  color: var(--lumo-secondary-text-color);
+  margin-block-end: calc(var(--lumo-space-m) * -0.5);
+}
+
+.cs-verify-form input:not([type="hidden"]) {
+  font-family: inherit;
+  font-size: var(--lumo-font-size-m);
+  height: var(--lumo-size-m);
+  padding: 0 var(--lumo-space-s);
+  color: var(--lumo-body-text-color);
+  background-color: var(--lumo-contrast-10pct);
+  border: 1px solid transparent;
+  border-radius: var(--lumo-border-radius-m);
+}
+
+.cs-verify-form input:not([type="hidden"]):focus-visible {
+  outline: none;
+  border-color: var(--lumo-primary-color);
+  box-shadow: 0 0 0 2px var(--lumo-primary-color-50pct);
+}
+
+/* Reproduces vaadin-button's primary variant from the same Lumo tokens. The
+ * button cannot BE a vaadin-button: a custom element is not form-associated,
+ * so type="submit" on one is inert and the form never posts. */
+.cs-verify-submit {
+  font-family: inherit;
+  font-size: var(--lumo-font-size-m);
+  font-weight: 600;
+  height: var(--lumo-size-m);
+  padding: 0 var(--lumo-space-m);
+  color: var(--lumo-primary-contrast-color);
+  background-color: var(--lumo-primary-color);
+  border: none;
+  border-radius: var(--lumo-border-radius-m);
+  cursor: pointer;
+}
+
+.cs-verify-submit:hover {
+  background-color: var(--lumo-primary-text-color);
+}
+
+.cs-verify-submit:focus-visible {
+  outline: 2px solid var(--lumo-primary-color-50pct);
+  outline-offset: 2px;
+}
+
 /* Page header used at the top of every view: icon + title (+ optional
  * description) so every view reads consistently instead of a bare grid. */
 .cs-view-header {

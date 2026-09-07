@@ -1124,6 +1124,238 @@ The fifth row is the one worth keeping. A rollback test that passes whether or
 not the rollback happened proves nothing, so the control run removes the
 database restore and confirms the assertion flips.
 
+## The verify page could not be submitted from a browser
+
+The two-factor login worked on the wire and did not work in a browser, and the
+gap between those two sentences is the whole of this entry.
+
+**A `vaadin-button` cannot submit a form.** `TwoFactorVerifyView` built its
+submit control as `com.vaadin.flow.component.button.Button` carrying
+`type="submit"`. That renders `<vaadin-button>`, a custom element, and a custom
+element is not form-associated - `type` on one is inert. So the `NativeForm`
+around it was never posted, `SecondFactorAuthenticationFilter` never ran, and
+nobody with 2FA enabled could finish signing in. The fix is the component
+`NativeForm`'s own javadoc already named: `NativeButton`, from the same
+`flow-html-components` package as the `Input` fields beside it. The rule this
+leaves behind is worth stating plainly, because the page mixes both kinds
+freely elsewhere (the brand row is a `HorizontalLayout`, the recovery box a
+`NativeDetails`): **anything inside `NativeForm` that the browser has to act on
+at submit time - fields, the submit control - must be a native element. Vaadin
+components are fine for layout and decoration only.**
+
+**The symptom looked like a live control, which is why it was not obvious.**
+Vaadin 25's `Button` constructor builds a `DisableOnClickController`, which
+registers a server-side `ClickEvent` listener unconditionally. So Flow wired up
+a client-side `click` listener and every press of Verify became a real UIDL
+round trip:
+
+    --> {"rpc":[{"type":"event","node":7,"event":"click",...}],"syncId":2,"clientId":2}
+    <-- {"clientId":3,"syncId":3}
+
+A click in, an empty response out - the handler body is `if (isDisableOnClick())`,
+which is false. The button was talking to the server enthusiastically and
+saying nothing. An inert control that did nothing at all would have been easier
+to diagnose.
+
+**Enter did not rescue it either**, which is worth recording because it is the
+first thing anyone tries. HTML implicit submission fires only if the form has a
+submit button, or has exactly one field that blocks implicit submission. This
+form has two blocking text inputs, `code` and `recoveryCode` (the hidden CSRF
+input does not block). So there was no submit path by any means, and adding the
+native button restores both at once.
+
+**Why 150 green tests did not catch it, and what now does.**
+`TwoFactorLoginTest` drives the real filter chain over real HTTP and passes
+whether or not the page is usable, because it hand-builds its POST with
+`HttpClient`. It could not have done otherwise: a Vaadin view is rendered
+client-side, so the markup is simply not in the bootstrap response an HTTP
+client receives - the test even reads its CSRF token from the `<meta>` tag for
+that reason. Every assertion in it was about the server, and the server was
+never wrong.
+
+The seam that closes this is `TwoFactorVerifyViewTest`, which constructs the
+view and walks the component tree `buildForm` returns (`buildForm` is
+package-private for that, and says so). It asserts the form posts to
+`SecondFactorAuthenticationFilter.PROCESSING_URL`, that it carries inputs named
+`code` and `recoveryCode`, that it contains exactly one element **whose tag is
+`button`** with `type=submit`, and that no `vaadin-button` appears in it at all.
+The last two are the regression; the tag, not the component type, is what the
+browser acts on, so that is what is asserted. **Confirmed to discriminate** by
+putting the `Button` back: those two tests fail and the other two pass, with the
+failure output listing `vaadin-button` in the tree and zero native buttons. A
+test that passes either way would have been worth nothing here, which is the
+whole lesson of the paragraph above it.
+
+**The page also had no styling to lose, and now needs some.** `buildForm` was
+already setting a `cs-verify-form` class that had no rule anywhere, so the
+card's flex layout stopped at the form element. Swapping to native controls
+removes Lumo's component styling as well, so the theme now carries
+`.cs-verify-form`, `.cs-verify-submit` and a rule for the form's visible inputs,
+rebuilt from the same Lumo custom properties `vaadin-button`'s primary variant
+uses. Scoped to the verify page's own classes - a global `input` rule in a
+Vaadin app reaches inside components that did not ask for it.
+
+## Codebase review - seven defects
+
+A read of the whole codebase looking for problems, rather than work on a
+feature. Each finding below was reproduced before it was fixed and each fix has
+a test that was confirmed to fail without it. That last step earned its keep
+twice: reasoning alone said the export was dropping DTSTAMP (ical4j's own
+VEvent constructor adds it - the missing property was VALUE=DATE), and said
+Google's date-only handling was already a day out (it is not). Both were
+checked by running them, and one whole change was reverted as a result.
+
+**All-day events were published as midnight-UTC timed events.** `ProviderEvent`
+normalized `start`/`end` to `Instant` and stopped there, so the DATE/DATE-TIME
+distinction died at the provider boundary and `IcsCalendarMapper.buildFeed`
+wrote `DTSTART:20260115T000000Z` for a source that said
+`DTSTART;VALUE=DATE:20260115`. Observed by parsing an all-day feed and
+re-exporting it, not deduced. The consequence is not cosmetic: a subscriber in
+`America/New_York` sees a 24-hour block starting at 19:00 the *previous
+evening*, so a public holiday lands on the wrong day - which is the one thing a
+calendar may not get wrong.
+
+The fix is an `allDay` component on `ProviderEvent`, deliberately added to the
+canonical record constructor rather than defaulted by an overload, so the
+compiler asks every producer the question that nobody had been asked before.
+Detection is per provider and each one signals it differently: ical4j hands back
+a `LocalDate` for `VALUE=DATE` and an `OffsetDateTime`/`ZonedDateTime` otherwise
+(so the parsed temporal's type IS the answer, for both the ICS and CalDAV
+mappers); Google populates `date` instead of `dateTime`; Graph has an explicit
+`isAllDay`. `start`/`end` stay `Instant` because the rule engine's DURATION and
+START conditions are defined on them - `allDay` decides how they are *written*.
+
+`IcsCalendarMapper.toUtcDate` reads the instant back in UTC rather than the
+system zone, which is exact because every producer sets it to midnight UTC of
+the date in question - going through the system zone would shift the date on any
+server not running on UTC, which is the same bug one layer down. Making that
+invariant actually true, rather than assumed, turned up two more things:
+
+- **MS Graph reported all-day boundaries in whatever zone it liked.**
+  `toInstant` converted through `DateTimeTimeZone.getTimeZone()`, so an all-day
+  event Graph described as midnight in Asia/Tokyo became `2026-07-31T15:00Z` -
+  whose UTC date is the day *before* the one Graph named, so the exported
+  `VALUE=DATE` would have been wrong, not merely offset. All-day boundaries are
+  now pinned to midnight UTC of the reported local date, ignoring the zone
+  beside it. The test uses an eastern zone deliberately: with a western one the
+  UTC date still comes out right and the assertion would pass either way.
+- **`MsGraphEventMapper`'s snapshot did not carry `isAllDay`**, so restoring an
+  all-day event from the trash recreated it as a timed midnight-to-midnight one.
+
+Google needed no change here, and that is worth writing down because it looks
+like it should have. `EventDateTime.getDate()` is a date-only
+google-http-client `DateTime`, and the obvious worry - that `getValue()`
+resolves it in the JVM's default zone - is wrong: it parses with a zone shift
+of 0 whatever the default is, verified by running it under three zones rather
+than reasoned about. A "fix" was written for it, found to change nothing, and
+reverted. What survives is a test that pins midnight-UTC as an invariant under
+a shifted default zone, labelled as a guard on a property the exporter now
+depends on rather than as a regression test for a bug that never existed.
+
+**A feed-side restore never invalidated the feed's cache.**
+`TrashService.restoreFeedExclusion`'s javadoc says the caller is responsible for
+triggering regeneration, and the Stage 2 note above says the same thing and even
+names `DeletionAuditService` as that caller - because `IcsExportService` already
+depends on `TrashService` and calling back the other way would close a cycle.
+The responsibility was named and then never implemented:
+`DeletionAuditService.restore` delegated and returned, and did not even inject
+`IcsExportService`. So Trash reported "Restored", the `FORCE_INCLUDE` override
+row was written correctly, the audit row flipped to RESTORED - and every
+subscriber kept receiving the feed without the event for up to
+`cache_ttl_seconds`, an hour by default.
+
+Every existing test passed throughout, because all of them assert on rows. The
+new `FeedRestoreInvalidationTest` therefore asserts on the *bytes the feed
+serves* after the restore, which is the only place the defect was visible. Its
+stub provider throws from both `deleteEvent` and `createEvent`, so it also pins
+down that a feed-side restore stays entirely out of the provider.
+
+**Nothing followed HTTP redirects, anywhere.** Spring's `RestClient` picks its
+request factory by what is on the classpath, and here that resolves to
+`ReactorClientHttpRequestFactory` - reactor-netty arrives transitively via
+azure-identity - whose client defaults to `followRedirect(false)`. Confirmed
+against a real local server that 302s: `Failed to fetch ICS feed ...: HTTP 302`,
+with a direct fetch of the same document as the control.
+
+That is a permanent failure, not a degraded one, and a plain `http://` feed URL
+upgrading to `https://` is enough to trigger it, so those sources simply never
+synced. Only `CalDavDiscoveryService`'s PROPFIND worked, because it had rolled
+its own redirect loop - which is also why the gap was easy to miss.
+
+The two cases needed opposite rules, and the difference is the whole reason this
+is not one line of configuration:
+
+- **ICS sources carry no credential**, so a hop to another host leaks nothing
+  and a same-site rule would break feeds legitimately behind a short link or a
+  CDN. `IcsSourceProvider` follows redirects with a hop limit and checks only
+  that the scheme stays HTTP - so a redirect cannot walk the fetch off into
+  `file:`, the same backstop `CalendarConnectionService` already applies to a
+  URL the user types.
+- **`CalDavClient` attaches the user's password to every request it makes**, so
+  switching the HTTP client's own redirect following on would have handed that
+  password to whatever host a hostile server named - reintroducing exactly the
+  Stage 5 finding `CalDavUris` was written for. Redirects are therefore followed
+  *inside* `CalDavClient`, every hop through `CalDavUris.resolveWithinSite`, and
+  the automatic behaviour stays off.
+
+Doing it in the client rather than per call site means listing, delete and
+restore get it too, and it made discovery's private loop redundant.
+`CalDavResponse` now carries `finalUri`, which discovery needs anyway: an href
+out of a multistatus body must be resolved against the URI that body came from,
+not the one that redirected, and iCloud's hop to a numbered partition host makes
+that the normal case rather than an exotic one. The method is preserved across a
+hop rather than rewritten to GET - what RFC 9110 asks of a non-browser client,
+and a `DELETE` quietly re-issued as a `GET` would report success for a deletion
+that never happened.
+
+**A blocked address renewed its own block forever.** `AppUserDetailsService`
+refuses a blocked address with a `LockedException` before looking the user up.
+That is an authentication failure event, `AuthenticationEventLogger` listens for
+all of those, and it called `recordFailure` - which set `lastFailureAt = now`.
+So each refused-while-blocked attempt bought another `BLOCK_DURATION`, and an
+attacker who kept knocking was never unblocked.
+
+That sounds like a feature until you remember the key is a **client IP**. Behind
+a NAT, a corporate egress address, or a `CALENDARSYNC_TRUSTED_PROXIES` list with
+the proxy missing (where every request already looks like it came from the
+proxy, as the deployment section above warns), it is an indefinite lockout of
+real users driven by somebody else entirely - the denial of service this class
+avoided by not keying on username, coming back in through the event wiring.
+`recordFailure` now stops counting and stops moving the window once
+`MAX_FAILURES` is reached, so a block lasts `BLOCK_DURATION` from the failure
+that caused it.
+
+**`MAX_TRACKED_ADDRESSES` bounded nothing.** `pruneIfCrowded` swept expired
+entries at the 10,000 mark and then inserted regardless, so a flood arriving
+faster than `BLOCK_DURATION` retires entries - which is what a distributed
+attack looks like - grew the map without limit while paying an O(n) scan on
+every failure past that point. The comment claimed a ceiling the code did not
+have. It now evicts the least recently active entries down to the cap.
+Evicting the oldest rather than refusing to track new addresses is the lesser of
+two bad options: refusing new entries preserves existing blocks, but hands an
+attacker a way to switch the throttle off entirely by filling the table with
+junk and then guessing from an address that can never be tracked. `Attempts`
+fields are now `volatile`, since they are written under `compute()` (atomic per
+key) but read outside it by `isBlocked` and the prune.
+
+**Case-insensitive CONTAINS depended on the server's locale.** It used
+`String.toLowerCase()` with the JVM default, while EQUALS (`equalsIgnoreCase`)
+and STARTS_WITH (`regionMatches`) are both locale-independent. Under a Turkish
+default locale `"MEETING".toLowerCase()` is `"meetıng"` with a dotless i, so a
+CONTAINS rule for `meeting` silently stopped matching while the same rule
+written as STARTS_WITH kept working - one operator on one field behaving
+differently depending on where the server happened to be configured. Now
+`Locale.ROOT`. `REGEX` is deliberately left alone: it uses
+`Pattern.CASE_INSENSITIVE`, which is ASCII-only folding, and adding
+`UNICODE_CASE` would change what existing saved rules match.
+
+**The last-admin refusal named a control that does not exist.** Disabling the
+only enabled admin is refused with "promote or enable another admin first", but
+`AdminUserView` only offers a role picker when *creating* an account - there is
+no promotion anywhere. Reworded to "create or enable", which is achievable.
+Adding role editing would also have closed it, but that is a new admin
+capability rather than a fix to the message that is wrong.
+
 ## Version substitutions
 
 Checked live against Maven Central during planning and again as each stage

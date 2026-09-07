@@ -40,6 +40,7 @@ public class MsGraphEventMapper {
                         .map(com.microsoft.graph.models.EmailAddress::getAddress)
                         .toList();
         boolean recurring = event.getRecurrence() != null;
+        boolean allDay = Boolean.TRUE.equals(event.getIsAllDay());
 
         try {
             SnapshotEvent clean = SnapshotEvent.from(event);
@@ -51,8 +52,9 @@ public class MsGraphEventMapper {
                     event.getBody() == null ? null : event.getBody().getContent(),
                     event.getLocation() == null ? null : event.getLocation().getDisplayName(),
                     attendees,
-                    toInstant(event.getStart()),
-                    toInstant(event.getEnd()),
+                    toInstant(event.getStart(), allDay),
+                    toInstant(event.getEnd(), allDay),
+                    allDay,
                     recurring,
                     calendarName,
                     SnapshotFormat.MS_GRAPH_JSON,
@@ -72,12 +74,30 @@ public class MsGraphEventMapper {
         }
     }
 
-    private Instant toInstant(DateTimeTimeZone dtz) {
+    /**
+     * An all-day event is pinned to midnight UTC of the calendar date Graph
+     * named, ignoring the timeZone it reported alongside it.
+     *
+     * That is the contract ProviderEvent.allDay documents, and IcsCalendarMapper
+     * reads the date straight back out in UTC on the way to a VALUE=DATE
+     * property - so if the instant were midnight in some other zone, the
+     * exported date would silently be a day out. Graph normally reports UTC for
+     * an all-day event's start and end, which makes this a no-op; making it
+     * explicit means the invariant holds rather than depending on that.
+     *
+     * A timed event keeps the zone conversion, because for those the instant is
+     * the answer rather than a carrier for a date.
+     */
+    private Instant toInstant(DateTimeTimeZone dtz, boolean allDay) {
         if (dtz == null || dtz.getDateTime() == null) {
             return null;
         }
+        LocalDateTime local = LocalDateTime.parse(dtz.getDateTime());
+        if (allDay) {
+            return local.toLocalDate().atStartOfDay(ZoneOffset.UTC).toInstant();
+        }
         ZoneId zone = dtz.getTimeZone() == null ? ZoneOffset.UTC : parseZone(dtz.getTimeZone());
-        return LocalDateTime.parse(dtz.getDateTime()).atZone(zone).toInstant();
+        return local.atZone(zone).toInstant();
     }
 
     private ZoneId parseZone(String timeZone) {
@@ -106,6 +126,7 @@ public class MsGraphEventMapper {
         public String startTimeZone;
         public String endDateTime;
         public String endTimeZone;
+        public Boolean isAllDay;
         public List<String> attendeeEmails;
 
         static SnapshotEvent from(Event event) {
@@ -127,6 +148,10 @@ public class MsGraphEventMapper {
                 s.endDateTime = event.getEnd().getDateTime();
                 s.endTimeZone = event.getEnd().getTimeZone();
             }
+            // Without this a restored all-day event comes back as a timed
+            // midnight-to-midnight one: Graph only treats start/end as dates
+            // when isAllDay says so, and the snapshot is the only record of it.
+            s.isAllDay = event.getIsAllDay();
             s.attendeeEmails = event.getAttendees() == null ? List.of()
                     : event.getAttendees().stream()
                             .map(Attendee::getEmailAddress)
@@ -163,6 +188,9 @@ public class MsGraphEventMapper {
                 end.setDateTime(endDateTime);
                 end.setTimeZone(endTimeZone);
                 event.setEnd(end);
+            }
+            if (isAllDay != null) {
+                event.setIsAllDay(isAllDay);
             }
             if (attendeeEmails != null && !attendeeEmails.isEmpty()) {
                 event.setAttendees(attendeeEmails.stream().map(email -> {

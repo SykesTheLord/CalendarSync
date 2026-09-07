@@ -2,6 +2,7 @@ package com.sykessec.calendarsync.service;
 
 import com.sykessec.calendarsync.entity.DeletionAudit;
 import com.sykessec.calendarsync.entity.enums.AuditStatus;
+import com.sykessec.calendarsync.ics.IcsExportService;
 import com.sykessec.calendarsync.repository.DeletionAuditRepository;
 import com.sykessec.calendarsync.security.CurrentUser;
 import com.sykessec.calendarsync.trash.RestoreOutcome;
@@ -18,12 +19,14 @@ public class DeletionAuditService {
 
     private final DeletionAuditRepository auditRepository;
     private final TrashService trashService;
+    private final IcsExportService icsExportService;
     private final CurrentUser currentUser;
 
     public DeletionAuditService(DeletionAuditRepository auditRepository, TrashService trashService,
-                                 CurrentUser currentUser) {
+                                 IcsExportService icsExportService, CurrentUser currentUser) {
         this.auditRepository = auditRepository;
         this.trashService = trashService;
+        this.icsExportService = icsExportService;
         this.currentUser = currentUser;
     }
 
@@ -59,7 +62,41 @@ public class DeletionAuditService {
         };
     }
 
+    /**
+     * Restores one trash entry and, for a feed-side exclusion, drops that
+     * feed's cached bytes.
+     *
+     * The invalidation belongs HERE rather than in TrashService, and that is
+     * not tidiness. TrashService.restoreFeedExclusion writes the FORCE_INCLUDE
+     * override that puts the event back, but IcsExportService already depends
+     * on TrashService (it records exclusions while regenerating), so calling
+     * back the other way would close a cycle. This class is the caller of
+     * restore() and depends on neither in the wrong direction, which is why
+     * TrashService's javadoc names it as the one responsible.
+     *
+     * It was named and then not implemented, which is the worst of both: a
+     * restore reported success, wrote the override, and then the feed kept
+     * serving the bytes it had already cached - for up to cache_ttl_seconds,
+     * an hour by default. The user is told the event is back while every
+     * subscriber still cannot see it.
+     *
+     * The feed id is read BEFORE the restore because a successful restore
+     * flips the row's status, and re-reading afterwards would work but makes
+     * the ordering look accidental. Ownership is enforced by the same
+     * user-scoped finder restore() itself uses, so a foreign audit id resolves
+     * to nothing here and invalidates nothing.
+     */
     public RestoreOutcome restore(Long auditId) {
-        return trashService.restore(currentUser.id(), auditId);
+        Long userId = currentUser.id();
+        Long publishedFeedId = auditRepository.findByIdAndUserId(auditId, userId)
+                .map(DeletionAudit::getPublishedFeedId)
+                .orElse(null);
+
+        RestoreOutcome outcome = trashService.restore(userId, auditId);
+
+        if (outcome.success() && publishedFeedId != null) {
+            icsExportService.invalidate(publishedFeedId);
+        }
+        return outcome;
     }
 }

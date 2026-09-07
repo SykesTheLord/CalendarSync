@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.Locale;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -23,7 +24,7 @@ class RuleEngineImplTest {
                                  List<String> attendees, Instant start, Instant end,
                                  boolean recurring, String calendarName) {
         return new ProviderEvent("uid-1", title, description, location, attendees, start, end,
-                recurring, calendarName, null, null);
+                false, recurring, calendarName, null, null);
     }
 
     private RuleCondition condition(RuleField field, RuleOperator operator, String value, boolean caseSensitive) {
@@ -313,5 +314,29 @@ class RuleEngineImplTest {
                 .containsExactly(RuleOperator.CONTAINS, RuleOperator.NOT_CONTAINS,
                         RuleOperator.STARTS_WITH, RuleOperator.NOT_STARTS_WITH,
                         RuleOperator.EQUALS, RuleOperator.REGEX);
+    }
+
+    /**
+     * CONTAINS was the one operator here whose case folding depended on the
+     * JVM's default locale: a default-locale toLowerCase() maps "I" to a
+     * dotless "i" under Turkish, so a rule matching "meeting" quietly stopped
+     * matching "MEETING" on a server configured that way - while STARTS_WITH
+     * and EQUALS, which never used it, carried on working. The locale is set
+     * and restored around the assertion because it is JVM-global state, and
+     * leaving it set would follow every later test in this JVM.
+     */
+    @Test
+    void caseInsensitiveContainsDoesNotDependOnTheDefaultLocale() {
+        Locale original = Locale.getDefault();
+        try {
+            Locale.setDefault(Locale.forLanguageTag("tr-TR"));
+
+            ProviderEvent event = event("WEEKLY MEETING", null, null, List.of(), null, null, false, "Work");
+
+            assertThat(engine.evaluateCondition(event,
+                    condition(RuleField.TITLE, RuleOperator.CONTAINS, "meeting", false))).isTrue();
+        } finally {
+            Locale.setDefault(original);
+        }
     }
 }

@@ -113,13 +113,54 @@ public class IcsSourceProvider implements CalendarProvider {
         return new String(bytes, StandardCharsets.UTF_8);
     }
 
+    /**
+     * Enough hops for the http-to-https upgrade plus a vanity or short URL
+     * resolving to its real home. Anything deeper is a misconfigured server.
+     */
+    private static final int MAX_REDIRECTS = 5;
+
     private record FetchResult(boolean notModified, String etag, String body) {
     }
 
+    /** Either a finished result, or the Location header telling us where to go next. */
+    private record FetchAttempt(FetchResult result, String redirectTo) {
+    }
+
+    /**
+     * Follows redirects, because nothing underneath does.
+     *
+     * Spring's RestClient resolves its request factory to a reactor-netty
+     * client, which defaults to followRedirect(false), so a 3xx fell through to
+     * the non-2xx branch below and the user was told their feed URL had failed
+     * with "HTTP 302". Published calendar URLs redirect routinely - a plain
+     * http:// address upgrading to https:// is enough to trigger it - so this
+     * was not an edge case; those sources simply never synced.
+     *
+     * Unlike CalDavClient this does NOT restrict the hop to the same site: no
+     * credential is attached to the request, so there is nothing to leak by
+     * arriving somewhere else, and a feed legitimately hosted behind a short
+     * link or a CDN would break under a same-site rule. The scheme is still
+     * checked, so a redirect cannot walk the fetch off HTTP entirely and into
+     * file: or jar: - the same backstop CalendarConnectionService applies to
+     * the URL a user types.
+     */
     private FetchResult fetch(String url, String previousEtag) throws ProviderException {
+        URI current = URI.create(url);
+        for (int hop = 0; hop <= MAX_REDIRECTS; hop++) {
+            FetchAttempt attempt = fetchOnce(current, url, previousEtag);
+            if (attempt.redirectTo() == null) {
+                return attempt.result();
+            }
+            current = nextHop(current, attempt.redirectTo(), url);
+        }
+        throw new ProviderException("Failed to fetch ICS feed " + url + ": redirected more than "
+                + MAX_REDIRECTS + " times");
+    }
+
+    private FetchAttempt fetchOnce(URI uri, String originalUrl, String previousEtag) throws ProviderException {
         try {
             return restClient.get()
-                    .uri(URI.create(url))
+                    .uri(uri)
                     .headers(headers -> {
                         if (previousEtag != null) {
                             headers.set(HttpHeaders.IF_NONE_MATCH, previousEtag);
@@ -129,7 +170,11 @@ public class IcsSourceProvider implements CalendarProvider {
                         int status = response.getStatusCode().value();
                         String etag = response.getHeaders().getFirst(HttpHeaders.ETAG);
                         if (status == 304) {
-                            return new FetchResult(true, etag, null);
+                            return new FetchAttempt(new FetchResult(true, etag, null), null);
+                        }
+                        String location = response.getHeaders().getFirst(HttpHeaders.LOCATION);
+                        if (status >= 300 && status < 400 && location != null) {
+                            return new FetchAttempt(null, location);
                         }
                         if (status < 200 || status >= 300) {
                             // Without this the error page itself gets handed to
@@ -138,10 +183,25 @@ public class IcsSourceProvider implements CalendarProvider {
                             throw new IllegalStateException("HTTP " + status);
                         }
                         String body = readCapped(response.getBody());
-                        return new FetchResult(false, etag, body);
+                        return new FetchAttempt(new FetchResult(false, etag, body), null);
                     }, true);
         } catch (RuntimeException e) {
-            throw new ProviderException("Failed to fetch ICS feed " + url + ": " + e.getMessage(), e);
+            throw new ProviderException("Failed to fetch ICS feed " + originalUrl + ": " + e.getMessage(), e);
         }
+    }
+
+    private URI nextHop(URI current, String location, String originalUrl) throws ProviderException {
+        URI target;
+        try {
+            target = current.resolve(location);
+        } catch (IllegalArgumentException e) {
+            throw new ProviderException("ICS feed " + originalUrl + " redirected to an unusable URL: " + location, e);
+        }
+        String scheme = target.getScheme() == null ? "" : target.getScheme().toLowerCase(java.util.Locale.ROOT);
+        if (!scheme.equals("http") && !scheme.equals("https")) {
+            throw new ProviderException("ICS feed " + originalUrl + " redirected to a non-HTTP URL (" + target
+                    + ") - refusing to follow");
+        }
+        return target;
     }
 }

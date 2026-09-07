@@ -101,8 +101,8 @@ class TrashServiceIntegrationTest extends AbstractIntegrationTest {
     }
 
     private ProviderEvent eventWithSnapshot(String uid) {
-        return new ProviderEvent(uid, "Team Sync", "desc", "loc", List.of(), null, null, false, "Home",
-                SnapshotFormat.ICS, "BEGIN:VEVENT\nUID:" + uid + "\nEND:VEVENT");
+        return new ProviderEvent(uid, "Team Sync", "desc", "loc", List.of(), null, null, false, false,
+                "Home", SnapshotFormat.ICS, "BEGIN:VEVENT\nUID:" + uid + "\nEND:VEVENT");
     }
 
     @Test
@@ -129,7 +129,7 @@ class TrashServiceIntegrationTest extends AbstractIntegrationTest {
     @Test
     void deleteIsAbortedWhenEventHasNoSnapshot() {
         ProviderEvent noSnapshot = new ProviderEvent("evt-2", "No Snapshot", null, null, List.of(),
-                null, null, false, "Home", null, null);
+                null, null, false, false, "Home", null, null);
 
         DeletionAudit audit = trashService.deleteWithSnapshot(userId, rule, connection, calendar, noSnapshot, RuleAction.DELETE);
 
@@ -205,7 +205,7 @@ class TrashServiceIntegrationTest extends AbstractIntegrationTest {
                                           SnapshotFormat snapshotFormat, String snapshotPayload) {
             createCalls.add(snapshotPayload);
             return new ProviderEvent("restored-evt-1", "restored", null, null, List.of(), null, null,
-                    false, calendar.getName(), snapshotFormat, snapshotPayload);
+                    false, false, calendar.getName(), snapshotFormat, snapshotPayload);
         }
     }
 }

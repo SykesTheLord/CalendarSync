@@ -66,8 +66,11 @@ public class UserAdminService {
                 .orElseThrow(() -> new IllegalArgumentException("No such user: " + userId));
 
         if (!enabled && user.getRole() == Role.ADMIN && lastEnabledAdmin(user)) {
+            // "create or enable", not "promote": a user's role is only settable
+            // when the account is created, so telling someone to promote one
+            // sends them looking for a control that does not exist.
             throw new IllegalArgumentException("This is the only enabled administrator - "
-                    + "promote or enable another admin first, or nobody will be able to manage accounts.");
+                    + "create or enable another admin first, or nobody will be able to manage accounts.");
         }
 
         user.setEnabled(enabled);

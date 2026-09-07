@@ -6,6 +6,7 @@ import org.springframework.web.context.request.ServletRequestAttributes;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -35,9 +36,12 @@ public class LoginAttemptService {
     static final Duration BLOCK_DURATION = Duration.ofMinutes(15);
 
     /**
-     * Bounds memory: an attacker rotating source addresses would otherwise add
-     * an entry per address. Entries expire on their own, this is the backstop
-     * for a burst that arrives faster than they expire.
+     * Hard ceiling on tracked addresses. An attacker rotating source addresses
+     * would otherwise add an entry per address, and expiry alone does not bound
+     * anything when failures arrive faster than BLOCK_DURATION retires them -
+     * the previous version scanned for expired entries at this size and then
+     * inserted regardless, so the map grew without limit and paid an O(n) scan
+     * on every failure past this point.
      */
     private static final int MAX_TRACKED_ADDRESSES = 10_000;
 
@@ -58,6 +62,27 @@ public class LoginAttemptService {
         return attempts.count >= MAX_FAILURES;
     }
 
+    /**
+     * Records one failed attempt - and deliberately stops moving the window
+     * once the address is already blocked.
+     *
+     * That is the whole point of the count guard below. A blocked address is
+     * refused by AppUserDetailsService with a LockedException, which is itself
+     * an authentication failure event, which lands back here - so every
+     * refused-while-blocked attempt used to reset lastFailureAt and buy another
+     * BLOCK_DURATION. An attacker hammering continuously was therefore never
+     * unblocked, which sounds like a feature until you remember the key is a
+     * client IP: behind a NAT, a corporate egress address, or a
+     * CALENDARSYNC_TRUSTED_PROXIES list that has the proxy missing (so every
+     * request looks like it came from the proxy), that is an indefinite lockout
+     * of real users driven by someone else entirely. It is the denial of
+     * service this class avoided by not keying on username, reintroduced
+     * through the event wiring.
+     *
+     * So the block lasts BLOCK_DURATION from the failure that caused it, and
+     * attempts made while blocked cost the attacker nothing and the victim
+     * nothing either.
+     */
     public void recordFailure(String clientAddress) {
         if (clientAddress == null) {
             return;
@@ -65,8 +90,10 @@ public class LoginAttemptService {
         pruneIfCrowded();
         attemptsByAddress.compute(clientAddress, (key, existing) -> {
             Attempts attempts = (existing == null || existing.expired()) ? new Attempts() : existing;
-            attempts.count++;
-            attempts.lastFailureAt = Instant.now();
+            if (attempts.count < MAX_FAILURES) {
+                attempts.count++;
+                attempts.lastFailureAt = Instant.now();
+            }
             return attempts;
         });
     }
@@ -101,15 +128,49 @@ public class LoginAttemptService {
         return null;
     }
 
+    /**
+     * Keeps the map at or below MAX_TRACKED_ADDRESSES, by expiry first and then
+     * by evicting the least recently active entries.
+     *
+     * The eviction step is the part that actually bounds it. Dropping only
+     * expired entries is a no-op exactly when it matters - a flood arriving
+     * faster than BLOCK_DURATION - and leaves an unbounded map plus a full scan
+     * per failure.
+     *
+     * Evicting the OLDEST is the lesser of two bad options. Refusing to track
+     * new addresses once full would preserve every existing block, but it also
+     * hands an attacker a way to stop the throttle entirely: fill the table
+     * with junk addresses, then guess passwords from an address that can never
+     * be tracked. Evicting the oldest means a flood mostly evicts its own
+     * earlier entries, and the worst case is that a stale block is forgotten
+     * early rather than that the throttle stops working.
+     */
     private void pruneIfCrowded() {
-        if (attemptsByAddress.size() >= MAX_TRACKED_ADDRESSES) {
-            attemptsByAddress.values().removeIf(Attempts::expired);
+        if (attemptsByAddress.size() < MAX_TRACKED_ADDRESSES) {
+            return;
         }
+        attemptsByAddress.values().removeIf(Attempts::expired);
+
+        int excess = attemptsByAddress.size() - MAX_TRACKED_ADDRESSES + 1;
+        if (excess <= 0) {
+            return;
+        }
+        attemptsByAddress.entrySet().stream()
+                .sorted(Comparator.comparing(entry -> entry.getValue().lastFailureAt))
+                .limit(excess)
+                .map(Map.Entry::getKey)
+                .toList()
+                .forEach(attemptsByAddress::remove);
     }
 
+    /**
+     * Both fields are volatile because they are written inside compute() - which
+     * is atomic per key - but read outside it by isBlocked() and by the prune
+     * above, and a stale read there would silently mean "not blocked".
+     */
     private static final class Attempts {
-        private int count;
-        private Instant lastFailureAt = Instant.now();
+        private volatile int count;
+        private volatile Instant lastFailureAt = Instant.now();
 
         boolean expired() {
             return Instant.now().isAfter(lastFailureAt.plus(BLOCK_DURATION));

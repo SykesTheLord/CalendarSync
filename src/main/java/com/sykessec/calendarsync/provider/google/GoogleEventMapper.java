@@ -51,6 +51,7 @@ public class GoogleEventMapper {
                     attendees,
                     toInstant(event.getStart()),
                     toInstant(event.getEnd()),
+                    isAllDay(event.getStart()),
                     recurring,
                     calendarName,
                     SnapshotFormat.GOOGLE_JSON,
@@ -69,6 +70,14 @@ public class GoogleEventMapper {
         }
     }
 
+    /**
+     * Google says "all day" by populating date instead of dateTime - the two
+     * are mutually exclusive in the API - so the presence of date IS the flag.
+     */
+    private boolean isAllDay(EventDateTime eventDateTime) {
+        return eventDateTime != null && eventDateTime.getDateTime() == null && eventDateTime.getDate() != null;
+    }
+
     private Instant toInstant(EventDateTime eventDateTime) {
         if (eventDateTime == null) {
             return null;
@@ -77,6 +86,11 @@ public class GoogleEventMapper {
             return Instant.ofEpochMilli(eventDateTime.getDateTime().getValue());
         }
         if (eventDateTime.getDate() != null) {
+            // Midnight UTC of the date Google named, which is the invariant
+            // ProviderEvent.allDay depends on. Checked rather than assumed: a
+            // date-only google-http-client DateTime parses with a zone shift of
+            // 0 regardless of the JVM's default zone, so getValue() is already
+            // midnight UTC and does not need re-deriving from the string.
             return Instant.ofEpochMilli(eventDateTime.getDate().getValue());
         }
         return null;

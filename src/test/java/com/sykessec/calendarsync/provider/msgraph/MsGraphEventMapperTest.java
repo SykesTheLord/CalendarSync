@@ -89,4 +89,53 @@ class MsGraphEventMapperTest {
         assertThat(restored.getAttendees()).hasSize(1);
         assertThat(restored.getAttendees().get(0).getEmailAddress().getAddress()).isEqualTo("alice@example.com");
     }
+
+    /**
+     * Graph flags an all-day event with isAllDay rather than by the shape of
+     * its start/end, so this is the only signal there is. The instant is pinned
+     * to midnight UTC of the date Graph named regardless of the timeZone beside
+     * it, because IcsCalendarMapper reads that date straight back out in UTC to
+     * write VALUE=DATE - a start at midnight in some other zone exports as the
+     * wrong day.
+     */
+    @Test
+    void marksAnAllDayEventAndPinsItToMidnightUtc() throws Exception {
+        Event event = sampleEvent();
+        event.setIsAllDay(true);
+        DateTimeTimeZone start = new DateTimeTimeZone();
+        start.setDateTime("2026-08-01T00:00:00.0000000");
+        start.setTimeZone("Asia/Tokyo");
+        event.setStart(start);
+
+        ProviderEvent mapped = mapper.toProviderEvent(event, "Work");
+
+        assertThat(mapped.allDay()).isTrue();
+        assertThat(mapped.start()).isEqualTo(Instant.parse("2026-08-01T00:00:00Z"));
+        // Tokyo rather than a western zone on purpose: converting midnight
+        // there lands on 2026-07-31T15:00Z, whose UTC date is the day BEFORE
+        // the one Graph named - so the feed would have exported the wrong date,
+        // not merely a different time.
+        assertThat(mapped.start().atZone(java.time.ZoneOffset.UTC).toLocalDate())
+                .isEqualTo(java.time.LocalDate.of(2026, 8, 1));
+    }
+
+    @Test
+    void aTimedEventIsNotMarkedAllDay() throws Exception {
+        assertThat(mapper.toProviderEvent(sampleEvent(), "Work").allDay()).isFalse();
+    }
+
+    /**
+     * Without isAllDay in the snapshot, restoring an all-day event from the
+     * trash recreates it as a timed midnight-to-midnight one.
+     */
+    @Test
+    void theSnapshotCarriesAllDayThroughARestore() throws Exception {
+        Event event = sampleEvent();
+        event.setIsAllDay(true);
+
+        ProviderEvent mapped = mapper.toProviderEvent(event, "Work");
+        Event restored = mapper.fromSnapshot(mapped.rawPayload());
+
+        assertThat(restored.getIsAllDay()).isTrue();
+    }
 }
